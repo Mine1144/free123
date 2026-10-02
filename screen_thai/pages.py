@@ -321,6 +321,22 @@ class CharactersPage(QWidget):
         pending_row.addStretch()
         pending_layout.addLayout(pending_row)
         right_layout.addWidget(pending_box, 1)
+        suggest_box = QGroupBox("คำศัพท์/ชื่อที่ AI เสนอจากข้อความที่ซ้ำ · ยังไม่ถูกใช้จนคุณกดรับ")
+        suggest_layout = QVBoxLayout(suggest_box)
+        self.suggest_list = QListWidget()
+        self.suggest_list.setMinimumHeight(96)
+        suggest_layout.addWidget(self.suggest_list)
+        suggest_row = QHBoxLayout()
+        accept = QPushButton("เพิ่มที่เลือกเข้า glossary")
+        accept.clicked.connect(lambda: self.session.accept_suggestions(self._selected_suggestions()))
+        dismiss = QPushButton("ไม่ใช้ที่เลือก")
+        dismiss.clicked.connect(lambda: self.session.dismiss_suggestions(self._selected_suggestions()))
+        suggest_row.addWidget(accept)
+        suggest_row.addWidget(dismiss)
+        suggest_row.addStretch()
+        suggest_layout.addLayout(suggest_row)
+        right_layout.addWidget(suggest_box)
+
         hint = QLabel("ระบบนี้ไม่สอนว่า 'เห็นหน้า = กำลังพูด' และไม่เดาเพศจากหน้าตา: "
                       "ชื่อจะผูกกับใบหน้าก็ต่อเมื่อผู้ใช้ยืนยัน และสีหน้าเป็นค่าที่วัดจากภาพนิ่ง "
                       "ไม่ใช่ผลตรวจอารมณ์ที่แม่นยำ")
@@ -393,6 +409,21 @@ class CharactersPage(QWidget):
             item = QListWidgetItem(text)
             item.setIcon(pixmap)
             self.faces_list.addItem(item)
+
+    def refresh_suggestions(self, suggestions):
+        """Show mined terms with their evidence. Nothing here is used until the user accepts."""
+        self.suggest_list.clear()
+        for item in suggestions or []:
+            if not isinstance(item, dict) or not item.get("source"):
+                continue
+            evidence = (item.get("evidence") or [""])[0]
+            self.suggest_list.addItem(
+                f"{item['source']} → {item.get('thai', '')} "
+                f"(พบ {item.get('count', 1)} ครั้ง · {item.get('confidence', 0):.2f}) · {evidence[:70]}")
+
+    def _selected_suggestions(self):
+        return [index.row() for index in self.suggest_list.selectedIndexes()] or (
+            [self.suggest_list.currentRow()] if self.suggest_list.currentRow() >= 0 else [])
 
     def _row_selected(self):
         row = self.table.currentRow()

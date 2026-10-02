@@ -16,6 +16,8 @@ ROLE_ORDER = {role: index for index, role in enumerate(ROLES)}
 INLINE_SPEAKER = re.compile(r"^([^\s:：]{1,20})\s*[:：]\s*(\S.*)$", re.S)
 NUMBERISH = re.compile(r"^(?=.*\d)[\d\s%./:+\-*×x,()]*$")
 SENTENCE_END = ("。", "！", "？", "…", ".", "!", "?", "!", "?")
+# Menus mark their options; wrapped dialogue usually starts with plain text.
+CHOICE_MARKERS = ("▶", "►", "▸", ">", "»", "・", "·", "*", "•", "●", "○", "◆", "◇", "-", "–")
 
 
 def _inside(box, other, pad: float = 0.0):
@@ -90,6 +92,38 @@ def _mark_name_tags(rows: dict[int, dict]):
                 break
 
 
+def _wrapped_continuation(previous: str, current: str) -> bool:
+    """True when two stacked lines read as one wrapped sentence rather than two menu options.
+
+    Menu options are short and/or carry a marker; a continuation of the same sentence usually
+    starts with a plain lowercase word, a comma, or a long unbroken run of text.
+    """
+    previous, current = previous.strip(), current.strip()
+    if not previous or not current:
+        return False
+    if current.startswith(CHOICE_MARKERS):
+        return False
+    if previous.endswith(SENTENCE_END):
+        return False
+    if current[:1].isupper() and len(current) < 25:
+        return False
+    return len(current) >= 12 or len(previous) >= 25
+
+
+def _name_tag_above(rows: dict[int, dict], group: list[dict]) -> bool:
+    """A name tag sitting right above a stacked group means it is dialogue, not a menu."""
+    first = group[0]
+    for row in rows.values():
+        if row.get("role") != "name_tag":
+            continue
+        gap = first["y"] - (row["y"] + row["h"])
+        if -int(0.05 * first["h"]) <= gap <= int(0.7 * first["h"]) and \
+                _overlap_x((row["x"], row["y"], row["w"], row["h"]),
+                           (first["x"], first["y"], first["w"], first["h"])) >= 0.25:
+            return True
+    return False
+
+
 def _mark_choices(rows: dict[int, dict]):
     stacked = [row for row in rows.values() if not row.get("role")
                or row.get("role") in ("dialogue", "unknown")]
@@ -104,9 +138,15 @@ def _mark_choices(rows: dict[int, dict]):
         gaps = [group[i + 1]["y"] - (group[i]["y"] + group[i]["h"]) for i in range(len(group) - 1)]
         heights = [item["h"] for item in group]
         even = max(heights) <= 2.6 * max(1, min(heights))
-        if even and all(-0.02 * heights[0] <= gap <= 3.0 * heights[0] for gap in gaps):
-            for row in group:
-                row["role"] = "choice"
+        if not (even and all(-0.02 * heights[0] <= gap <= 3.0 * heights[0] for gap in gaps)):
+            continue
+        if _name_tag_above(rows, group):
+            continue
+        if any(_wrapped_continuation(group[index]["text"], group[index + 1]["text"])
+               for index in range(len(group) - 1)):
+            continue
+        for row in group:
+            row["role"] = "choice"
 
 
 def _mark_hud(rows: dict[int, dict]):

@@ -5,6 +5,7 @@ from dataclasses import replace
 import json
 import sys
 import time
+from urllib.parse import urlsplit
 
 import mss
 from PIL import Image
@@ -18,9 +19,12 @@ from PySide6.QtWidgets import (
 )
 
 from . import context as context_module
-from . import layout, speech
+from . import diagnostics, layout, speech
 from .dialogue import DialogueMemory
 from .faces import FaceMemory
+from .memory import TranslationMemory, mine_candidates, merge_candidates, voice_signature
+from .merge import merge_lines
+from .models import Result, Translation
 from .overlay import Overlay, RegionPicker
 from .pages import CharactersPage, ResearchPage, ask_name, warning
 from .pipeline import AIWorker, OCRWorker, ResearchWorker, VisionWorker
@@ -56,6 +60,13 @@ class Window(QMainWindow):
         self.job_hints = []
         self.job_tokens = {}
         self.dialogue = DialogueMemory()
+        self.tm = TranslationMemory()
+        self.pending_pairs = []          # (source, thai) waiting to be mined for glossary terms
+        self.negative_lines = []         # Thai lines used as negative evidence by the miner
+        self.mine_at = 0
+        self.suggestions = []
+        self.swallowed = {}              # merged-away block ids -> the id that keeps the text
+        self.cache_hits = 0
         self.latest_image = None
         self.job_blocks = []
         self.hints = []
@@ -70,6 +81,8 @@ class Window(QMainWindow):
         self.picker = None
         self.current_profile = self.settings.profile
         self.memory = self.store.load_memory(self.current_profile)
+        self.tm = self.store.load_memory_of_translation(self.current_profile)
+        self.suggestions = self.store.load_suggestions(self.current_profile)
         self.profile_data = self.store.load_profile(self.current_profile)
         self.brief = self.profile_data.get("research", {})
         self._build_ui()
@@ -379,6 +392,55 @@ class Window(QMainWindow):
         face_note.setWordWrap(True)
         face_form.addRow(face_note)
         al.addWidget(self.face_group)
+
+        self.quality_group = QGroupBox("คุณภาพการแปล · ประหยัดเวลาและค่าใช้จ่าย")
+        quality_form = QFormLayout(self.quality_group)
+        self.merge_lines = QCheckBox("ผสานบรรทัดซับที่ถูกตัดขึ้นบรรทัดใหม่ให้เป็นประโยคเดียวก่อนแปล")
+        self.translation_memory = QCheckBox("ใช้คำแปลเดิมที่คุณเคยยืนยันแล้วกับข้อความที่ซ้ำ "
+                                            "(ไม่เรียก AI ซ้ำ)")
+        self.glossary_mine = QCheckBox("ขุดคำศัพท์/ชื่อที่พบบ่อยขึ้นมาเป็นข้อเสนอ glossary "
+                                       "(คุณกดรับก่อนจึงจะถูกใช้)")
+        self.review_consistency = QCheckBox("รอบตรวจความสม่ำเสมอ: ให้ AI แก้เฉพาะบรรทัดที่ผิด "
+                                            "glossary หรือการ์ดที่ล็อกไว้ (เพิ่ม 1 คำขอ)")
+        self.review_max_lines = QSpinBox()
+        self.review_max_lines.setRange(1, 40)
+        self.review_max_lines.setSuffix(" บรรทัด/รอบ")
+        for widget in (self.merge_lines, self.translation_memory, self.glossary_mine,
+                       self.review_consistency):
+            quality_form.addRow("", widget)
+        quality_form.addRow("เพดานบรรทัดในรอบตรวจ", self.review_max_lines)
+        quality_note = QLabel("หน่วยความจำคำแปลเก็บในโปรไฟล์เกมนี้เท่านั้น และบรรทัดที่ขึ้นเตือน "
+                              "จะไม่ถูกใช้ซ้ำอัตโนมัติ • ข้อเสนอ glossary ไม่ถูกใช้จนคุณกดรับ")
+        quality_note.setObjectName("muted")
+        quality_note.setWordWrap(True)
+        quality_form.addRow(quality_note)
+        al.addWidget(self.quality_group)
+
+        self.selfcheck_group = QGroupBox("ตรวจสุขภาพระบบ (ทำงานในเครื่อง ไม่ส่งข้อมูล)")
+        check_layout = QVBoxLayout(self.selfcheck_group)
+        check_row = QHBoxLayout()
+        run_check = QPushButton("ตรวจตอนนี้")
+        run_check.clicked.connect(lambda: self.run_selfcheck(False))
+        run_check_ai = QPushButton("ตรวจการเชื่อมต่อ AI ด้วย")
+        run_check_ai.clicked.connect(lambda: self.run_selfcheck(True))
+        self.model_picker = QComboBox()
+        self.model_picker.setMinimumWidth(220)
+        pick = QPushButton("ใช้โมเดลนี้")
+        pick.clicked.connect(self.apply_picked_model)
+        check_row.addWidget(run_check)
+        check_row.addWidget(run_check_ai)
+        check_row.addWidget(self.model_picker, 1)
+        check_row.addWidget(pick)
+        check_layout.addLayout(check_row)
+        self.selfcheck_view = QPlainTextEdit()
+        self.selfcheck_view.setReadOnly(True)
+        self.selfcheck_view.setMaximumHeight(190)
+        self.selfcheck_view.setPlaceholderText(
+            "กด ‘ตรวจตอนนี้’ เพื่อตรวจว่า OCR, ใบหน้า, แผนการพูด, โฟลเดอร์ข้อมูล, ฟอนต์ไทย "
+            "และหน่วยความจำคำแปล พร้อมใช้งานจริงบนเครื่องนี้หรือไม่")
+        check_layout.addWidget(self.selfcheck_view)
+        al.addWidget(self.selfcheck_group)
+
         help_text = QLabel(
             "ลำดับการทำงาน\n"
             "1. แท็บ ‘วิจัยเกมก่อนแปล’ — ใส่ชื่อเกม/ลิงก์/ข้อความ หรือเปิดค้นเว็บ แล้วกด เริ่มวิจัยเกม\n"
@@ -417,6 +479,11 @@ class Window(QMainWindow):
         self.layout_hints.setChecked(s.layout_hints)
         self.speech_plan.setChecked(s.speech_plan)
         self.show_speaker_label.setChecked(s.show_speaker_label)
+        self.merge_lines.setChecked(s.merge_lines)
+        self.translation_memory.setChecked(s.translation_memory)
+        self.glossary_mine.setChecked(s.glossary_mine)
+        self.review_consistency.setChecked(s.review_consistency)
+        self.review_max_lines.setValue(s.review_max_lines)
         self.face_backend.setCurrentIndex(max(0, self.face_backend.findData(s.face_backend)))
         self.face_model.setText(s.face_model)
         self.face_sample.setValue(s.face_sample_ms)
@@ -446,6 +513,11 @@ class Window(QMainWindow):
         self.profile_data = self.store.load_profile(self.current_profile)
         self.memory = FaceMemory({"characters": self.profile_data.get("characters", {})})
         self.brief = self.profile_data.get("research", {})
+        self.tm = self.store.load_memory_of_translation(self.current_profile)
+        self.suggestions = self.store.load_suggestions(self.current_profile)
+        self.pending_pairs = []
+        self.negative_lines = []
+        self.cache_hits = 0
         self.dialogue.clear()
         profile = self.profile_data
         self.graph.update_relations(profile["relations"])
@@ -461,6 +533,7 @@ class Window(QMainWindow):
                            glossary=self.glossary.toPlainText()[:4000])
             self.store.save_profile(self.current_profile, profile)
             self.store.save_memory(self.current_profile, self.memory)
+            self.store.save_translation_memory(self.current_profile, self.tm)
             return True
         except OSError:
             QMessageBox.warning(self, "บันทึกไม่ได้", "ตรวจสิทธิ์เขียนโฟลเดอร์ข้อมูล ScreenThai")
@@ -512,6 +585,11 @@ class Window(QMainWindow):
                        layout_hints=self.layout_hints.isChecked(),
                        speech_plan=self.speech_plan.isChecked(),
                        show_speaker_label=self.show_speaker_label.isChecked(),
+                       merge_lines=self.merge_lines.isChecked(),
+                       translation_memory=self.translation_memory.isChecked(),
+                       glossary_mine=self.glossary_mine.isChecked(),
+                       review_consistency=self.review_consistency.isChecked(),
+                       review_max_lines=self.review_max_lines.value(),
                        research_search=research["provider"],
                        research_endpoint=research["endpoint"],
                        research_max_sources=research["max_sources"],
@@ -526,6 +604,62 @@ class Window(QMainWindow):
                                 str(self.brief.get("user_notes", "")),
                                 self.settings.research_title or self.current_profile)
         self.characters_page.refresh(self.memory, self.last_scan_faces, self.last_scan_image)
+        self.characters_page.refresh_suggestions(self.suggestions)
+
+    # --- self-check ---------------------------------------------------------------------
+
+    def run_selfcheck(self, probe_ai: bool = False):
+        """Report honestly what works on this machine; never claim an untested part is fine."""
+        try:
+            settings = self.read_settings()
+        except ValueError:
+            settings = self.settings
+        key = ""
+        if probe_ai:
+            try:
+                parts = urlsplit(settings.endpoint)
+                if parts.hostname not in ("localhost", "127.0.0.1", "::1"):
+                    answer = QMessageBox.question(
+                        self, "ตรวจการเชื่อมต่อ AI?",
+                        f"จะเรียกดู ‘รายชื่อโมเดล’ จาก\n{settings.endpoint}\n\n"
+                        "ไม่มีการส่งภาพหน้าจอ ข้อความ OCR หรือ notes ในการตรวจครั้งนี้\nอนุญาตหรือไม่?")
+                    if answer != QMessageBox.StandardButton.Yes:
+                        probe_ai = False
+                if probe_ai:
+                    key = self.key.text().strip() or self.secrets.get(settings.endpoint)
+            except Exception:
+                key = ""
+        self.status.setText("กำลังตรวจสุขภาพระบบ…")
+        QApplication.processEvents()
+        checks = diagnostics.run_checks(settings, self.store, profile_name=self.current_profile,
+                                        memory=self.memory, tm=self.tm, brief=self.brief,
+                                        probe_ai=probe_ai, key=key)
+        self.selfcheck_view.setPlainText(diagnostics.report_text(checks))
+        if probe_ai:
+            try:
+                from .providers import list_models
+                models = list_models(settings, key=key)
+            except Exception:
+                models = []
+            if models:
+                current = self.model.text().strip()
+                self.model_picker.clear()
+                self.model_picker.addItems(models)
+                if current in models:
+                    self.model_picker.setCurrentText(current)
+        counts = diagnostics.summary(checks)
+        self.status.setText(f"ตรวจแล้ว: ผ่าน {counts[diagnostics.OK]} · "
+                            f"มีข้อจำกัด {counts[diagnostics.WARN]} · "
+                            f"ไม่ผ่าน {counts[diagnostics.FAIL]} · ข้าม {counts[diagnostics.SKIP]}")
+        return checks
+
+    def apply_picked_model(self):
+        name = self.model_picker.currentText().strip()
+        if not name:
+            return
+        self.model.setText(name)
+        self.status.setText(f"ตั้งโมเดลเป็น {name} แล้ว • กดบันทึกการตั้งค่าหรือเริ่มแปลเพื่อใช้")
+        self.run_selfcheck(False)
 
     def face_backend_note(self) -> str:
         from .vision import build_detector
@@ -1003,8 +1137,14 @@ class Window(QMainWindow):
             return
         self.last_frame = time.monotonic()
         self.latest_image = image
-        self.state.update(blocks)
         self.hints = layout.classify(blocks, image.size) if self.settings.layout_hints else []
+        blocks, self.swallowed, _ = merge_lines(blocks, self.hints) \
+            if self.settings.merge_lines and self.settings.layout_hints else (blocks, {}, {})
+        if self.swallowed:
+            keep = {block.id for block in blocks}
+            self.hints = [hint for hint in self.hints if hint.id in keep]
+        self.state.update(blocks)
+        self._apply_memory_hits()
         self._render()
         if not blocks:
             self.status.setText("ไม่พบข้อความที่ OCR อ่านได้ • คำแปลเดิมถูกล้างแล้ว")
@@ -1048,6 +1188,26 @@ class Window(QMainWindow):
         if self.latest_image is not None:
             self.overlay.display(self.state.blocks, self.state.rendered(), self.latest_image.size)
 
+    def _apply_memory_hits(self):
+        """Render repeated lines straight from the player's own translation memory.
+
+        Only lines that were accepted without QC warnings come back, and a line whose character
+        card changed since it was stored is left for the model again.
+        """
+        if not self.settings.translation_memory:
+            return
+        hits = self.tm.lookup(self.state.blocks, self.hints, self.memory)
+        if not hits:
+            return
+        cached = Result([Translation(block_id, hit["thai"], hit["speaker"])
+                         for block_id, hit in sorted(hits.items())])
+        tokens = {block_id: self.state.tokens[block_id] for block_id in hits
+                  if block_id in self.state.tokens}
+        if self.state.accept(tokens, cached) and cached.translations:
+            self.cache_hits += len(cached.translations)
+            self.status.setText(f"ใช้คำแปลที่คุณเคยยืนยันไว้ {len(cached.translations)} บรรทัด "
+                                f"(ไม่เรียก AI) • ประหยัดเวลา/ค่าใช้จ่าย")
+
     def _frame_context(self, blocks):
         source = {b.id: b.text for b in blocks}
         return context_module.frame_context(self.settings, blocks, self.hints, self.faces,
@@ -1059,8 +1219,17 @@ class Window(QMainWindow):
             return
         self.ai_busy = True
         self.job_id += 1
-        self.job_tokens = self.state.snapshot()
-        self.job_blocks = list(self.state.blocks)
+        # Only blocks whose occurrence has no answer yet: lines already served from the
+        # translation memory are never sent to the model again.
+        self.job_blocks = [block for block in self.state.blocks
+                           if self.state.tokens.get(block.id) not in self.state.resolved]
+        if not self.job_blocks:
+            self.ai_busy = False
+            self.status.setText("ทุกบรรทัดมาจากหน่วยความจำคำแปลแล้ว • รอข้อความใหม่")
+            return
+        # The answer may only resolve the occurrences we are asking about; a cached line keeps
+        # its rendering even though this request never mentioned it.
+        self.job_tokens = {block.id: self.state.tokens[block.id] for block in self.job_blocks}
         self.job_hints = list(self.hints)
         self.job_started = time.monotonic()
         frame = self._frame_context(self.job_blocks)
@@ -1092,11 +1261,105 @@ class Window(QMainWindow):
             self.dialogue.add(resolved, translation.thai, source.get(translation.id, ""),
                               translation.listener, translation.emotion, translation.delivery,
                               "ai", "", time.monotonic())
+            self._learn_line(source.get(translation.id, ""), translation.thai, resolved,
+                             warnings)
         result = replace(result, translations=rendered)
         return result
 
+    def _learn_line(self, source: str, thai: str, speaker: str, warnings):
+        """Feed the translation memory and the glossary miner.
+
+        A line that raised a QC warning is stored but marked for review, so it is never replayed
+        blindly. The miner only gets clean pairs, so a bad draft cannot teach a bad term.
+        """
+        if not source or not thai:
+            return
+        card = self.memory.card(speaker) if speaker else None
+        voice = voice_signature(card) if card else ""
+        if self.settings.translation_memory:
+            self.tm.learn(source, thai, speaker, voice, warned=bool(warnings))
+        if warnings or not self.settings.glossary_mine:
+            return
+        self.pending_pairs.append((source, thai))
+        del self.pending_pairs[:-400]
+        # Thai lines from another frame are negative evidence for the miner: a chunk that also
+        # shows up in a line without the term is not that term's rendering.
+        self.negative_lines.append(thai)
+        del self.negative_lines[:-60]
+        if len(self.pending_pairs) - self.mine_at >= 15:
+            self.mine_glossary()
+
+    def mine_glossary(self) -> int:
+        """Suggest glossary terms from repeated names/kanji and the Thai wording already used."""
+        if not self.pending_pairs:
+            return 0
+        self.mine_at = len(self.pending_pairs)
+        found = mine_candidates(self.pending_pairs, self.glossary.toPlainText(), min_count=2,
+                                negative=self.negative_lines[-40:])
+        before = len(self.suggestions)
+        self.suggestions = merge_candidates(self.suggestions, found)
+        added = max(0, len(self.suggestions) - before)
+        try:
+            self.store.save_suggestions(self.current_profile, self.suggestions)
+        except OSError:
+            self.status.setText("ขุดคำศัพท์ได้ แต่บันทึกข้อเสนอลงดิสก์ไม่ได้")
+        if added:
+            self.status.setText(f"พบคำศัพท์ที่น่าเพิ่มใน glossary {added} คำ "
+                                f"(ดูได้ในแท็บตัวละคร · ยังไม่ถูกใช้จนคุณกดเพิ่ม)")
+        self.refresh_pages()
+        return added
+
+    def dismiss_suggestions(self, indexes) -> int:
+        """Hide suggestions the player does not want; they can be mined again later."""
+        indexes = set(indexes or [])
+        if not indexes:
+            return 0
+        self.suggestions = [item for index, item in enumerate(self.suggestions)
+                            if index not in indexes]
+        try:
+            self.store.save_suggestions(self.current_profile, self.suggestions)
+        except OSError:
+            pass
+        self.refresh_pages()
+        return len(indexes)
+
+    def accept_suggestions(self, indexes) -> int:
+        """Move chosen suggestions into the user's glossary — the only place terms are used from."""
+        current = self.glossary.toPlainText()
+        pairs = list(self.memory_module_pairs(current))
+        accepted = 0
+        keep = []
+        for index, item in enumerate(self.suggestions):
+            if index in set(indexes):
+                pairs.append((item["source"], item["thai"]))
+                accepted += 1
+            else:
+                keep.append(item)
+        if not accepted:
+            return 0
+        seen = []
+        for source, thai in pairs:
+            if (source, thai) not in seen:
+                seen.append((source, thai))
+        from .memory import glossary_text
+        self.glossary.setPlainText(glossary_text(seen)[:4000])
+        self.suggestions = keep
+        self.store.save_suggestions(self.current_profile, keep)
+        self.save_memory()
+        self.refresh_pages()
+        self.status.setText(f"เพิ่ม {accepted} คำใน glossary แล้ว • จะถูกใช้กับการแปลครั้งถัดไป")
+        return accepted
+
+    @staticmethod
+    def memory_module_pairs(text: str):
+        from .memory import parse_glossary
+        return parse_glossary(text)
+
     def _ai_done(self, epoch, job_id, result, error, memory):
-        self.ai_busy = False
+        if job_id == self.job_id:
+            # Only the response of the current job may clear the flag: a late answer from an
+            # older request must not make the app think the newer request finished.
+            self.ai_busy = False
         if self.closing or not self.active or epoch != self.epoch or job_id != self.job_id:
             return
         if error:
@@ -1123,6 +1386,11 @@ class Window(QMainWindow):
                 self.store.learn(self.current_profile, result, self.memory)
             except OSError:
                 self.status.setText("แปลสำเร็จ แต่บันทึกบริบทลงดิสก์ไม่ได้")
+        try:
+            if self.settings.translation_memory:
+                self.store.save_translation_memory(self.current_profile, self.tm)
+        except OSError:
+            self.status.setText("แปลสำเร็จ แต่บันทึกหน่วยความจำคำแปลไม่ได้")
         self.profile_data = self.store.load_profile(self.current_profile)
         self.scene.setPlainText(
             f"People: {', '.join(result.scene.people)}\nPlace: {result.scene.place}\n"

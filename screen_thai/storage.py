@@ -39,6 +39,7 @@ def write_json(path: Path, value):
 DEFAULT_PROFILE = {
     "name": "ทั่วไป", "notes": "", "glossary": "", "summary": "", "relations": [],
     "characters": {}, "research": {}, "research_sources": [],
+    "glossary_suggestions": [], "translation_memory": {"entries": {}},
 }
 
 # Sections the UI is allowed to write back; anything else stays read-only for safety.
@@ -67,6 +68,8 @@ class Store:
         defaults["characters"] = {}
         defaults["research"] = {}
         defaults["research_sources"] = []
+        defaults["glossary_suggestions"] = []
+        defaults["translation_memory"] = {"entries": {}}
         raw = read_json(self.profile_path(name), {})
         if isinstance(raw, dict):
             for key, value in defaults.items():
@@ -93,6 +96,26 @@ class Store:
         profile["research"] = brief if isinstance(brief, dict) else {}
         if sources is not None:
             profile["research_sources"] = sources[:12]
+        self.save_profile(name, profile)
+
+    def load_memory_of_translation(self, name: str):
+        """Translation memory for one profile: the user's own accepted wording, per game."""
+        from .memory import TranslationMemory
+        profile = self.load_profile(name)
+        return TranslationMemory(profile.get("translation_memory") or {})
+
+    def save_translation_memory(self, name: str, tm):
+        profile = self.load_profile(name)
+        profile["translation_memory"] = tm.to_dict()
+        self.save_profile(name, profile)
+
+    def load_suggestions(self, name: str) -> list:
+        profile = self.load_profile(name)
+        return profile.get("glossary_suggestions") or []
+
+    def save_suggestions(self, name: str, suggestions: list):
+        profile = self.load_profile(name)
+        profile["glossary_suggestions"] = list(suggestions or [])[:40]
         self.save_profile(name, profile)
 
     def learn(self, name: str, result: Result, memory: FaceMemory | None = None):

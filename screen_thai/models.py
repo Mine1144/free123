@@ -85,6 +85,12 @@ class Settings:
     speech_plan: bool = True
     show_speaker_label: bool = False
     # Research step (all network work is opt-in and never includes screenshots).
+    translation_memory: bool = True      # reuse your own accepted wording for repeated lines
+    glossary_mine: bool = True           # suggest glossary terms from repeated names
+    merge_lines: bool = True             # join wrapped subtitle lines before translating
+    review_consistency: bool = False     # one extra AI pass over flagged lines only
+    review_max_lines: int = 12
+
     research_search: str = "off"       # off | searxng | brave | serper | tavily | custom
     research_endpoint: str = ""
     research_max_sources: int = 6
@@ -120,6 +126,7 @@ class Settings:
         default.face_sample_ms = max(400, min(10000, default.face_sample_ms))
         default.max_faces = max(1, min(8, default.max_faces))
         default.research_max_sources = max(1, min(12, default.research_max_sources))
+        default.review_max_lines = max(1, min(40, default.review_max_lines))
         default.research_title = default.research_title[:120]
         default.research_aliases = default.research_aliases[:200]
         return default

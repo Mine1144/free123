@@ -165,3 +165,36 @@ def test_settings_new_fields_are_validated():
     assert settings.research_search == "off" and settings.research_max_sources == 12
     assert settings.show_speaker_label is True
     assert settings.to_dict()["research_auto"] is True
+
+
+def test_translation_quality_settings_are_validated():
+    settings = Settings.from_dict({"review_max_lines": 9999, "merge_lines": "yes",
+                                   "translation_memory": False, "glossary_mine": True,
+                                   "review_consistency": True})
+    assert settings.review_max_lines == 40          # clamped, not accepted blindly
+    assert settings.merge_lines is True             # wrong type falls back to the default
+    assert settings.translation_memory is False and settings.review_consistency is True
+    assert settings.glossary_mine is True
+
+
+def test_translation_memory_is_bounded_on_the_way_in():
+    from screen_thai.memory import TranslationMemory
+    raw = {"entries": {f"line {index}": {"thai": "ท" * (index + 1)} for index in range(900)}}
+    tm = TranslationMemory(raw)
+    assert len(tm.entries) <= 800
+    assert tm.to_dict()["entries"]
+
+
+def test_translation_memory_survives_a_profile_round_trip(tmp_path):
+    from screen_thai.faces import FaceMemory
+    from screen_thai.memory import TranslationMemory
+    from screen_thai.storage import Store
+    store = Store(tmp_path)
+    tm = TranslationMemory()
+    tm.learn("Wait here", "รอที่นี่")
+    store.save_translation_memory("เกม", tm)
+    store.save_memory("เกม", FaceMemory())
+    again = store.load_memory_of_translation("เกม")
+    assert again.get("Wait here")["thai"] == "รอที่นี่"
+    store.save_suggestions("เกม", [{"source": "Ryza", "thai": "ไรซ่า"}])
+    assert store.load_suggestions("เกม")[0]["source"] == "Ryza"
