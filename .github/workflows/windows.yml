@@ -1,0 +1,46 @@
+name: Windows build and tests
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'arena/**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+          cache: pip
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Lint
+        run: python -m ruff check .
+      - name: Test (including offscreen native UI)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+      - name: Real OCR model smoke
+        run: python scripts/smoke-ocr.py
+      - name: Package Windows application
+        run: >-
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name ScreenThai
+          --collect-all rapidocr_onnxruntime --collect-all onnxruntime
+          --collect-all keyring --hidden-import keyring.backends.Windows
+          --collect-submodules win32ctypes --copy-metadata screen-thai scripts/launch.py
+      - name: Add instructions
+        shell: pwsh
+        run: |
+          Copy-Item README.md dist/ScreenThai/README.md
+          Copy-Item docs dist/ScreenThai/docs -Recurse
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenThai-Windows-x64
+          path: dist/ScreenThai/
+          retention-days: 14
+          if-no-files-found: error
