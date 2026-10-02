@@ -30,11 +30,26 @@ def test_overlay_paints_thai(app):
     overlay.close()
 
 
+def test_new_pages_render(app, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    from screen_thai.app import Window
+    window = Window()
+    window.research_page.override_edit.setPlainText("ยืนยัน: ไรซ่าใช้คำว่า พี่สาว")
+    window.research_save_override()
+    window.characters_page.refresh(window.memory, [], None)
+    assert "ไรซ่า" in window.brief.get("user_notes", "")
+    assert window.research_page.values()["provider"] in ("off", "searxng", "brave", "serper",
+                                                         "tavily", "custom")
+    window.close()
+    QTimer.singleShot(5000, app.quit)
+    app.exec()
+
+
 def test_window_creation_and_graceful_shutdown(app, tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     from screen_thai.app import Window
     window = Window()
-    assert window.tabs.count() == 4
+    assert window.tabs.count() == 6
     window.close()
     QTimer.singleShot(5000, app.quit)
     app.exec()

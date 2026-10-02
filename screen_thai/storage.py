@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 
+from .faces import FaceMemory
 from .models import Result, Settings
 
 
@@ -35,6 +36,15 @@ def write_json(path: Path, value):
             os.unlink(name)
 
 
+DEFAULT_PROFILE = {
+    "name": "ทั่วไป", "notes": "", "glossary": "", "summary": "", "relations": [],
+    "characters": {}, "research": {}, "research_sources": [],
+}
+
+# Sections the UI is allowed to write back; anything else stays read-only for safety.
+EDITABLE_KEYS = ("notes", "glossary", "name", "research")
+
+
 class Store:
     def __init__(self, root: Path | None = None):
         self.root = root or data_dir()
@@ -52,7 +62,11 @@ class Store:
         return self.root / "profiles" / f"{digest}.json"
 
     def load_profile(self, name: str) -> dict:
-        defaults = {"name": name, "notes": "", "glossary": "", "summary": "", "relations": []}
+        defaults = dict(DEFAULT_PROFILE)
+        defaults["name"] = name
+        defaults["characters"] = {}
+        defaults["research"] = {}
+        defaults["research_sources"] = []
         raw = read_json(self.profile_path(name), {})
         if isinstance(raw, dict):
             for key, value in defaults.items():
@@ -63,7 +77,25 @@ class Store:
     def save_profile(self, name: str, profile: dict):
         write_json(self.profile_path(name), profile)
 
-    def learn(self, name: str, result: Result):
+    def load_memory(self, name: str) -> FaceMemory:
+        """Face/character memory for one profile (descriptors only, never images)."""
+        profile = self.load_profile(name)
+        return FaceMemory({"characters": profile.get("characters", {})})
+
+    def save_memory(self, name: str, memory: FaceMemory):
+        profile = self.load_profile(name)
+        memory.prune()
+        profile["characters"] = memory.to_dict()["characters"]
+        self.save_profile(name, profile)
+
+    def save_research(self, name: str, brief: dict, sources: list | None = None):
+        profile = self.load_profile(name)
+        profile["research"] = brief if isinstance(brief, dict) else {}
+        if sources is not None:
+            profile["research_sources"] = sources[:12]
+        self.save_profile(name, profile)
+
+    def learn(self, name: str, result: Result, memory: FaceMemory | None = None):
         profile = self.load_profile(name)
         if result.scene.summary:
             profile["summary"] = result.scene.summary
@@ -74,6 +106,18 @@ class Store:
                 relations[(str(rel["from"]), str(rel["to"]))] = rel
         profile["relations"] = list(relations.values())[-40:]
         self.save_profile(name, profile)
+        if memory is None:
+            memory = self.load_memory(name)
+        changed = False
+        for update in result.scene.characters:
+            if memory.apply_hypothesis(update):
+                changed = True
+        for link in getattr(result.scene, "faces", []) or []:
+            memory.add_pending(link.get("track", ""), link.get("character", ""),
+                               link.get("evidence", ""), float(link.get("confidence", 0)))
+        if changed or (getattr(result.scene, "faces", None) or []):
+            self.save_memory(name, memory)
+        return memory
 
 
 class Secrets:

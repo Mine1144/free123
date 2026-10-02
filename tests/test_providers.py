@@ -61,3 +61,59 @@ def test_timeout_has_actionable_message():
     client = AIClient(Settings(), transport=httpx.MockTransport(handler))
     with pytest.raises(ProviderError, match="timeout"):
         client.translate([Block(0, "Hello", (0, 0, 20, 20))], Image.new("RGB", (20, 20)), {})
+
+
+def test_translate_sends_layout_faces_and_locked_voice():
+    captured = {}
+
+    def handler(request):
+        body = json.loads(request.content)
+        captured["payload"] = json.loads(body["messages"][-1]["content"])
+        content = json.dumps({"translations": [{"id": 0, "thai": "สวัสดี", "speaker": "Alyssa"}]})
+        return httpx.Response(200, json={"message": {"content": content}})
+
+    from screen_thai.faces import FaceMemory
+    from screen_thai.models import Block
+    from screen_thai.vision import Appearance, ExpressionCues, FaceBox, FaceObservation
+    memory = FaceMemory()
+    memory.ensure("Alyssa", confirmed=True)
+    memory.set_voice("Alyssa", self="แม่", address="ลูก", particles="ค่ะ", locked=True)
+    blocks = [Block(0, "Alyssa", (120, 480, 160, 34)), Block(1, "私が守るわ。", (100, 520, 900, 150))]
+    observation = FaceObservation(1, FaceBox(100, 300, 120, 120),
+                                  ExpressionCues("ยิ้ม", 0.3, 0.1, 0.2, 0.6, 0.2, 2.0, 0.0, "landmarks"),
+                                  Appearance("#111111", "#222222", "#333333", ("#111111",), 0.4,
+                                             0.2, 0.1))
+    observation.character = "Alyssa"
+    frame = {"layout": [{"id": 1, "role": "dialogue"}], "faces": [
+        {"track": "ใบหน้าที่ 1", "identified_as": "Alyssa", "identified_source": "ผู้ใช้ยืนยัน"}]}
+    client = AIClient(Settings(), "k", transport=httpx.MockTransport(handler))
+    result = client.translate(blocks, Image.new("RGB", (100, 100)), {"characters": {}}, frame, memory)
+    assert result.translations[0].speaker == "Alyssa"
+    payload = captured["payload"]
+    assert payload["layout"][0]["role"] == "dialogue"
+    assert payload["faces"][0]["identified_as"] == "Alyssa"
+    card = payload["characters_confirmed_by_user"]["Alyssa"]
+    assert card["locked_voice"]["self"] == "แม่" and card["locked_voice"]["particles"] == "ค่ะ"
+
+
+def test_research_call_never_attaches_an_image():
+    captured = {}
+
+    def handler(request):
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"message": {"content": '{"title": "X"}'}})
+
+    client = AIClient(Settings(), "k", transport=httpx.MockTransport(handler))
+    text = client.research("prompt", "system")
+    assert text.startswith("{")
+    message = captured["payload"]["messages"][-1]
+    assert "images" not in message
+    assert captured["payload"]["messages"][0]["role"] == "system"
+
+
+def test_invalid_model_json_becomes_actionable_error():
+    def handler(request):
+        return httpx.Response(200, json={"message": {"content": "not json at all"}})
+    client = AIClient(Settings(), transport=httpx.MockTransport(handler))
+    with pytest.raises(ProviderError, match="JSON"):
+        client.translate([Block(0, "Hello", (0, 0, 20, 20))], Image.new("RGB", (20, 20)), {})
