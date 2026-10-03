@@ -8,6 +8,8 @@
 
 ## เริ่มใช้บน Windows
 
+> คู่มือติดตั้งฉบับละเอียด (รวมการติดตั้ง Local AI ให้ครบ, ทางเลือก AI อื่น, การตรวจว่าติดตั้งสำเร็จ, การถอนการติดตั้ง และแก้ปัญหาที่พบบ่อย): **[docs/INSTALL.md](docs/INSTALL.md)**
+
 ### วิธีที่ 1: รันจากซอร์ส (พร้อมใช้ใน repository นี้)
 
 1. ติดตั้ง **Python 3.11 x64** จาก [python.org](https://www.python.org/downloads/windows/) โดยเปิด Python Launcher (`py`)
@@ -142,7 +144,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 12.3 การดาวน์โหลด llama.cpp/GGUF ในแอปเป็น *ตัวช่วยดาวน์โหลดและรัน* ไม่ใช่การรับรองโมเดล: ไฟล์โมเดลมีขนาดหลาย GB, **ไม่ได้ทดสอบดาวน์โหลด/รันจริงบน Windows ในรีโปนี้**, ไม่มีการอัปเดตอัตโนมัติ, ไม่มี UI ลบโมเดล (ลบไฟล์ในโฟลเดอร์ข้อมูลเอง), ไม่รับประกัน GPU/ความเร็วต่อการ์ดรุ่นใด, และน้ำหนักโมเดลมีใบอนุญาตต่างจากตัว llama.cpp (MIT) — ตรวจใบอนุญาตของ repo ที่เลือกเอง
 13. Windows 10/11 **x64** เป็นเป้าหมาย Windows ARM/32-bit ไม่อยู่ในขอบเขตการทดสอบ
 
-รายละเอียด Local AI ในแอป: [docs/LOCAL-AI.md](docs/LOCAL-AI.md) · สี่ฟีเจอร์ใหม่ (ใบหน้า สีหน้า วิธีพูด วิจัยเกม): [docs/CHARACTER-AI.md](docs/CHARACTER-AI.md) · เทียบคลิป: [docs/REFERENCE.md](docs/REFERENCE.md) · แผนทดสอบ: [docs/TESTING.md](docs/TESTING.md)
+ติดตั้ง/ตั้งค่าเครื่อง: [docs/INSTALL.md](docs/INSTALL.md) · Local AI ในแอป: [docs/LOCAL-AI.md](docs/LOCAL-AI.md) · สี่ฟีเจอร์ใหม่ (ใบหน้า สีหน้า วิธีพูด วิจัยเกม): [docs/CHARACTER-AI.md](docs/CHARACTER-AI.md) · เทียบคลิป: [docs/REFERENCE.md](docs/REFERENCE.md) · แผนทดสอบ: [docs/TESTING.md](docs/TESTING.md)
 
 ## สำหรับพัฒนา
 
