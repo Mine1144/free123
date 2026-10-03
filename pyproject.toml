@@ -13,6 +13,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Face landmarks (expression cues, stable identity matching). mediapipe pins numpy<2 and pulls
+# opencv-contrib-python; without it the app falls back to OpenCV-only face detection or to off.
+faces = ["mediapipe==0.10.21"]
 dev = ["pytest>=8,<9", "ruff>=0.9,<1", "pyinstaller>=6.10,<7"]
 
 [project.scripts]
