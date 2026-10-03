@@ -61,3 +61,140 @@ def test_timeout_has_actionable_message():
     client = AIClient(Settings(), transport=httpx.MockTransport(handler))
     with pytest.raises(ProviderError, match="timeout"):
         client.translate([Block(0, "Hello", (0, 0, 20, 20))], Image.new("RGB", (20, 20)), {})
+
+
+def test_translate_sends_layout_faces_and_locked_voice():
+    captured = {}
+
+    def handler(request):
+        body = json.loads(request.content)
+        captured["payload"] = json.loads(body["messages"][-1]["content"])
+        content = json.dumps({"translations": [{"id": 0, "thai": "สวัสดี", "speaker": "Alyssa"}]})
+        return httpx.Response(200, json={"message": {"content": content}})
+
+    from screen_thai.faces import FaceMemory
+    from screen_thai.models import Block
+    from screen_thai.vision import Appearance, ExpressionCues, FaceBox, FaceObservation
+    memory = FaceMemory()
+    memory.ensure("Alyssa", confirmed=True)
+    memory.set_voice("Alyssa", self="แม่", address="ลูก", particles="ค่ะ", locked=True)
+    blocks = [Block(0, "Alyssa", (120, 480, 160, 34)), Block(1, "私が守るわ。", (100, 520, 900, 150))]
+    observation = FaceObservation(1, FaceBox(100, 300, 120, 120),
+                                  ExpressionCues("ยิ้ม", 0.3, 0.1, 0.2, 0.6, 0.2, 2.0, 0.0, "landmarks"),
+                                  Appearance("#111111", "#222222", "#333333", ("#111111",), 0.4,
+                                             0.2, 0.1))
+    observation.character = "Alyssa"
+    frame = {"layout": [{"id": 1, "role": "dialogue"}], "faces": [
+        {"track": "ใบหน้าที่ 1", "identified_as": "Alyssa", "identified_source": "ผู้ใช้ยืนยัน"}]}
+    client = AIClient(Settings(), "k", transport=httpx.MockTransport(handler))
+    result = client.translate(blocks, Image.new("RGB", (100, 100)), {"characters": {}}, frame, memory)
+    assert result.translations[0].speaker == "Alyssa"
+    payload = captured["payload"]
+    assert payload["layout"][0]["role"] == "dialogue"
+    assert payload["faces"][0]["identified_as"] == "Alyssa"
+    card = payload["characters_confirmed_by_user"]["Alyssa"]
+    assert card["locked_voice"]["self"] == "แม่" and card["locked_voice"]["particles"] == "ค่ะ"
+
+
+def test_research_call_never_attaches_an_image():
+    captured = {}
+
+    def handler(request):
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"message": {"content": '{"title": "X"}'}})
+
+    client = AIClient(Settings(), "k", transport=httpx.MockTransport(handler))
+    text = client.research("prompt", "system")
+    assert text.startswith("{")
+    message = captured["payload"]["messages"][-1]
+    assert "images" not in message
+    assert captured["payload"]["messages"][0]["role"] == "system"
+
+
+def test_invalid_model_json_becomes_actionable_error():
+    def handler(request):
+        return httpx.Response(200, json={"message": {"content": "not json at all"}})
+    client = AIClient(Settings(), transport=httpx.MockTransport(handler))
+    with pytest.raises(ProviderError, match="JSON"):
+        client.translate([Block(0, "Hello", (0, 0, 20, 20))], Image.new("RGB", (20, 20)), {})
+
+
+# --- consistency review pass -------------------------------------------------------------
+
+def review_settings():
+    from screen_thai.models import Settings
+    return Settings(provider="ollama", endpoint="http://localhost:11434", model="m",
+                    review_consistency=True, review_max_lines=5)
+
+
+def test_review_fixes_only_flagged_lines_and_records_a_reason():
+    from screen_thai.memory import check_terms
+    from screen_thai.providers import AIClient
+    from screen_thai.models import Block, Result, Translation
+
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        payload = json.loads(body["messages"][-1]["content"])
+        calls.append(payload)
+        return httpx.Response(200, json={"message": {"content": json.dumps(
+            {"fixes": [{"id": 1, "thai": "ไรซ่าอยู่ที่นี่", "reason": "ใช้คำตาม glossary"},
+                       {"id": 99, "thai": "ปลอม"}]})}})
+
+    client = AIClient(review_settings(), "k", httpx.MockTransport(handler))
+    blocks = [Block(1, "Ryza is here.", (0, 0, 10, 10))]
+    drafts = Result([Translation(1, "เด็กสาวอยู่ที่นี่", "")])
+    fixed = client._review_if_needed(drafts, blocks, {"glossary": "Ryza = ไรซ่า"}, None, None)
+    assert fixed.translations[0].thai == "ไรซ่าอยู่ที่นี่"
+    assert any("รอบตรวจ" in warning for warning in fixed.translations[0].warnings)
+    assert calls and calls[0]["glossary"] == [{"source": "Ryza", "thai": "ไรซ่า"}]
+    # The unknown id never reaches the result.
+    assert len(fixed.translations) == 1
+    assert check_terms("Ryza is here.", fixed.translations[0].thai, "Ryza = ไรซ่า") == []
+
+
+def test_review_is_skipped_when_nothing_is_flagged():
+    from screen_thai.providers import AIClient
+    from screen_thai.models import Block, Result, Translation
+
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(200, json={"message": {"content": "{}"}})
+
+    client = AIClient(review_settings(), "k", httpx.MockTransport(handler))
+    blocks = [Block(1, "Ryza is here.", (0, 0, 10, 10))]
+    drafts = Result([Translation(1, "ไรซ่าอยู่ที่นี่", "")])
+    fixed = client._review_if_needed(drafts, blocks, {"glossary": "Ryza = ไรซ่า"}, None, None)
+    assert fixed is drafts and calls == []
+
+
+def test_review_failure_never_discards_the_translation():
+    from screen_thai.providers import AIClient, ProviderError
+    from screen_thai.models import Block, Result, Translation
+
+    def handler(request):
+        return httpx.Response(500, json={"error": "nope"})
+
+    client = AIClient(review_settings(), "k", httpx.MockTransport(handler))
+    blocks = [Block(1, "Ryza is here.", (0, 0, 10, 10))]
+    drafts = Result([Translation(1, "เด็กสาวอยู่ที่นี่", "")])
+    fixed = client._review_if_needed(drafts, blocks, {"glossary": "Ryza = ไรซ่า"}, None, None)
+    assert fixed.translations[0].thai == "เด็กสาวอยู่ที่นี่"
+    assert isinstance(ProviderError("x"), Exception)
+
+
+def test_review_payload_includes_locked_voices():
+    from screen_thai.providers import build_review_payload
+    from screen_thai.models import Block, Translation
+    from screen_thai.speech import PronounPlan
+
+    blocks = [Block(1, "I will go.", (0, 0, 10, 10))]
+    payload = json.loads(build_review_payload(
+        blocks, [Translation(1, "ฉันจะไป", "Alyssa")], "Ryza = ไรซ่า",
+        {"Alyssa": PronounPlan("ฉัน", "เธอ", "ค่ะ", "กันเอง", locked=("สรรพนามแทนตัวเอง",))},
+        ["บรรทัดก่อนหน้า"]))
+    assert payload["locked_voices"]["Alyssa"] == ["สรรพนามแทนตัวเอง"]
+    assert payload["previous_lines"] == ["บรรทัดก่อนหน้า"]

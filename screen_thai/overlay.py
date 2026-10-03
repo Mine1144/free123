@@ -50,7 +50,8 @@ class Overlay(QWidget):
 
     def display(self, blocks: list[Block], result: Result, size):
         lookup = {b.id: b for b in blocks}
-        self.items = [(lookup[t.id], t.thai) for t in result.translations if t.id in lookup]
+        self.items = [(lookup[t.id], t.thai, t.speaker if self.settings.show_speaker_label else "")
+                      for t in result.translations if t.id in lookup]
         self.image_size = size
         self.update()
 
@@ -62,7 +63,7 @@ class Overlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         sx, sy = self.width() / self.image_size[0], self.height() / self.image_size[1]
-        for block, thai in self.items:
+        for block, thai, speaker in self.items:
             x, y, w, h = block.box
             x, y = max(0, x*sx-4), max(0, y*sy-3)
             width = min(self.width()-x, max(w*sx+8, 70))
@@ -70,7 +71,8 @@ class Overlay(QWidget):
                 continue
             # Qt text layout uses Thai shaping and word breaking; never paint text as HTML.
             font = QFont("Leelawadee UI", self.settings.font_size)
-            layout = QTextLayout(thai, font)
+            body = f"{speaker}: {thai}" if speaker and speaker not in thai else thai
+            layout = QTextLayout(body, font)
             option = QTextOption()
             option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
             layout.setTextOption(option)

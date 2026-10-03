@@ -108,3 +108,93 @@ def test_learning_keeps_manual_notes(tmp_path):
     store.learn("game", result)
     assert store.load_profile("game")["notes"] == "Use หนู/แม่"
     assert store.load_profile("game")["summary"] == "สรุป"
+
+
+def test_new_translation_fields_are_parsed_and_clamped():
+    output = {"translations": [{"id": 0, "thai": "สวัสดี", "speaker": "Grace", "listener": "Kiro",
+                               "emotion": "เศร้า", "delivery": "พูดช้า ๆ", "self_pronoun": "หนู",
+                               "address_pronoun": "พี่", "particles": "ค่ะ", "confidence": 0.8,
+                               "emotion_typo": "โกรธ"},
+                              {"id": 0, "thai": "ซ้ำ", "emotion": "ไม่ใช่ค่าที่อนุญาต"}]}
+    result = parse_result(json.dumps(output), [block()])
+    line = result.translations[0]
+    assert (line.speaker, line.listener, line.emotion) == ("Grace", "Kiro", "เศร้า")
+    assert line.particles == "ค่ะ" and round(line.confidence, 2) == 0.8
+    assert len(result.translations) == 1
+
+
+def test_character_updates_need_evidence_and_never_claim_gender_without_it():
+    output = {"translations": [], "scene": {"characters": [
+        {"name": "Kiro", "role": "นักดาบ", "evidence": "Kiro: I will protect you", "confidence": 0.9,
+         "gender": "male"},
+        {"name": "ไม่มีหลักฐาน", "role": "?", "evidence": "", "confidence": 0.95},
+        {"name": "เดาเพศ", "evidence": "หน้าตาเหมือนผู้หญิง", "confidence": 0.9, "gender": "female"}]}}
+    result = parse_result(json.dumps(output), [])
+    names = [card["name"] for card in result.scene.characters]
+    assert names == ["Kiro", "เดาเพศ"]
+    assert result.scene.characters[0]["gender"] == "male"
+
+
+def test_face_links_require_evidence_and_a_known_or_visible_name():
+    blocks = [Block(0, "Grace", (0, 0, 10, 10)), Block(1, "Hello", (0, 20, 10, 10))]
+    output = {"translations": [], "scene": {"faces": [
+        {"track": "ใบหน้าที่ 1", "character": "Grace", "evidence": "name tag above her", "confidence": 0.9},
+        {"track": "ใบหน้าที่ 2", "character": "นักฆ่า", "evidence": "", "confidence": 0.9},
+        {"track": "ใบหน้าที่ 3", "character": "ไม่รู้จัก", "evidence": "maybe", "confidence": 0.99},
+        {"track": "ใบหน้าที่ 1", "character": "Mio", "evidence": "Mio: hey", "confidence": 0.5}]}}
+    result = parse_result(json.dumps(output), blocks, characters=("Mio",))
+    assert [link["character"] for link in result.scene.faces] == ["Grace"]
+
+
+def test_expressions_need_cues_or_evidence_and_are_capped():
+    output = {"translations": [], "scene": {"expressions": [
+        {"character": "Grace", "expression": "ยิ้ม", "cues": "มุมปากโค้งขึ้น 0.2", "confidence": 0.6},
+        {"character": "Grace", "expression": "ยิ้ม", "confidence": 0.6},
+        {"character": "Kiro", "expression": "ไม่ใช่ค่าที่อนุญาต", "cues": "x", "confidence": 0.9},
+        {"character": "Kiro", "expression": "โกรธ", "cues": "คิ้วขมวด", "confidence": 0.1}]}}
+    result = parse_result(json.dumps(output), [])
+    assert [item["expression"] for item in result.scene.expressions] == ["ยิ้ม"]
+
+
+def test_settings_new_fields_are_validated():
+    settings = Settings.from_dict({"face_backend": "ไม่รู้จัก", "face_sample_ms": 10,
+                                   "max_faces": 99, "research_search": "google",
+                                   "research_max_sources": 50, "show_speaker_label": True})
+    assert settings.face_backend == "auto"
+    assert settings.face_sample_ms == 400 and settings.max_faces == 8
+    assert settings.research_search == "off" and settings.research_max_sources == 12
+    assert settings.show_speaker_label is True
+    assert settings.to_dict()["research_auto"] is True
+
+
+def test_translation_quality_settings_are_validated():
+    settings = Settings.from_dict({"review_max_lines": 9999, "merge_lines": "yes",
+                                   "translation_memory": False, "glossary_mine": True,
+                                   "review_consistency": True})
+    assert settings.review_max_lines == 40          # clamped, not accepted blindly
+    assert settings.merge_lines is True             # wrong type falls back to the default
+    assert settings.translation_memory is False and settings.review_consistency is True
+    assert settings.glossary_mine is True
+
+
+def test_translation_memory_is_bounded_on_the_way_in():
+    from screen_thai.memory import TranslationMemory
+    raw = {"entries": {f"line {index}": {"thai": "ท" * (index + 1)} for index in range(900)}}
+    tm = TranslationMemory(raw)
+    assert len(tm.entries) <= 800
+    assert tm.to_dict()["entries"]
+
+
+def test_translation_memory_survives_a_profile_round_trip(tmp_path):
+    from screen_thai.faces import FaceMemory
+    from screen_thai.memory import TranslationMemory
+    from screen_thai.storage import Store
+    store = Store(tmp_path)
+    tm = TranslationMemory()
+    tm.learn("Wait here", "รอที่นี่")
+    store.save_translation_memory("เกม", tm)
+    store.save_memory("เกม", FaceMemory())
+    again = store.load_memory_of_translation("เกม")
+    assert again.get("Wait here")["thai"] == "รอที่นี่"
+    store.save_suggestions("เกม", [{"source": "Ryza", "thai": "ไรซ่า"}])
+    assert store.load_suggestions("เกม")[0]["source"] == "Ryza"
