@@ -22,12 +22,16 @@ from . import context as context_module
 from . import diagnostics, layout, speech
 from .dialogue import DialogueMemory
 from .faces import FaceMemory
+from pathlib import Path
+
+from .llama import LlamaError, LlamaRuntime, bin_dir, extract_binary, find_binary, hf_model_files
+from .llama import installed_models, models_dir, pick_quant_files, settings_guess
 from .memory import TranslationMemory, mine_candidates, merge_candidates, voice_signature
 from .merge import merge_lines
 from .models import Result, Translation
 from .overlay import Overlay, RegionPicker
-from .pages import CharactersPage, ResearchPage, ask_name, warning
-from .pipeline import AIWorker, OCRWorker, ResearchWorker, VisionWorker
+from .pages import CharactersPage, LocalAIPage, ResearchPage, ask_name, warning
+from .pipeline import AIWorker, DownloadWorker, OCRWorker, ResearchWorker, VisionWorker
 from .providers import validate_endpoint
 from .state import FrameState
 from .storage import Secrets, Store
@@ -42,6 +46,7 @@ class Window(QMainWindow):
     ai_requested = Signal(int, int, object, object, object, str, object, object)
     vision_requested = Signal(int, int, object, object, object)
     research_requested = Signal(str, object, str, str, str, object)
+    download_requested = Signal(str, str, str)
 
     def __init__(self):
         super().__init__()
@@ -61,6 +66,7 @@ class Window(QMainWindow):
         self.job_tokens = {}
         self.dialogue = DialogueMemory()
         self.tm = TranslationMemory()
+        self.llama = LlamaRuntime()
         self.pending_pairs = []          # (source, thai) waiting to be mined for glossary terms
         self.negative_lines = []         # Thai lines used as negative evidence by the miner
         self.mine_at = 0
@@ -75,6 +81,10 @@ class Window(QMainWindow):
         self.last_scan_faces = []
         self.last_vision_at = 0.0
         self.research_started_for = ""
+        self.downloads = {}                 # label -> {"total": int, "done": int, "name": str}
+        self.download_failures = []
+        self.pending_assets = []
+        self.pending_llama_files = []
         self.history = []
         self.last_frame = 0.0
         self.capture_pending = False
@@ -139,6 +149,15 @@ class Window(QMainWindow):
         self.vision_thread.finished.connect(self.vision_worker.deleteLater)
         self.vision_thread.finished.connect(self._shutdown_ready)
         self.vision_thread.start()
+        self.download_thread = QThread(self)
+        self.download_worker = DownloadWorker()
+        self.download_worker.moveToThread(self.download_thread)
+        self.download_requested.connect(self.download_worker.process)
+        self.download_worker.progress.connect(self._download_progress)
+        self.download_worker.done.connect(self._download_done)
+        self.download_thread.finished.connect(self.download_worker.deleteLater)
+        self.download_thread.finished.connect(self._shutdown_ready)
+        self.download_thread.start()
         self.research_thread = QThread(self)
         self.research_worker = ResearchWorker()
         self.research_worker.moveToThread(self.research_thread)
@@ -176,6 +195,7 @@ class Window(QMainWindow):
         self._build_translate_tab()
         self._build_memory_tab()
         self.research_page = ResearchPage(self)
+        self.local_page = LocalAIPage(self)
         self.tabs.addTab(self.research_page, "วิจัยเกมก่อนแปล")
         self.characters_page = CharactersPage(self)
         self.tabs.addTab(self.characters_page, "ตัวละคร · ใบหน้า · วิธีพูด")
@@ -455,6 +475,7 @@ class Window(QMainWindow):
         help_text.setObjectName("muted")
         al.addWidget(help_text)
         al.addStretch()
+        self.tabs.addTab(self.local_page, "Local AI (llama.cpp)")
         self.tabs.addTab(advanced, "ตั้งค่าและวิธีใช้")
 
     # --- settings ----------------------------------------------------------------------
@@ -594,7 +615,11 @@ class Window(QMainWindow):
                        research_endpoint=research["endpoint"],
                        research_max_sources=research["max_sources"],
                        research_title=research["title"], research_aliases=research["aliases"],
-                       research_auto=research["auto"])
+                       research_auto=research["auto"],
+                       llama_binary=self.local_page.values()["binary"],
+                       llama_port=self.local_page.values()["port"],
+                       llama_ctx=self.local_page.values()["ctx"],
+                       llama_gpu_layers=self.local_page.values()["gpu"])
 
     # --- pages -------------------------------------------------------------------------
 
@@ -605,6 +630,332 @@ class Window(QMainWindow):
                                 self.settings.research_title or self.current_profile)
         self.characters_page.refresh(self.memory, self.last_scan_faces, self.last_scan_image)
         self.characters_page.refresh_suggestions(self.suggestions)
+        self.local_page.load(self.settings)
+        self.refresh_llama_models()
+
+    # --- local AI (llama.cpp) ------------------------------------------------------------
+
+    def llama_note(self, message: str):
+        self.local_page.download_note.setText(message)
+
+    def pick_llama_binary(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "เลือกไฟล์ llama-server", "", "llama-server (llama-server*);;ทุกไฟล์ (*)")
+        if path:
+            self.local_page.binary_edit.setText(path)
+            self.status.setText("เลือกไฟล์ llama-server แล้ว • กด ‘เริ่ม llama-server’ เพื่อทดสอบ")
+
+    def fetch_llama_assets(self):
+        """Ask GitHub for the published llama.cpp builds (metadata only, no download yet)."""
+        answer = QMessageBox.question(
+            self, "ดึงรายการรุ่นจาก GitHub?",
+            "จะเชื่อมต่อ api.github.com เพื่อดูรายชื่อไฟล์รุ่นล่าสุดของ llama.cpp\n\n"
+            "ยังไม่มีการดาวน์โหลดไฟล์ใด ๆ ในขั้นนี้ • ไม่มีการส่งข้อมูลหน้าจอหรือโปรไฟล์เกม\n"
+            "อนุญาตหรือไม่?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            from .llama import llama_assets
+            assets = llama_assets()
+        except LlamaError as exc:
+            QMessageBox.warning(self, "ดึงรายการไม่ได้", str(exc))
+            return
+        self.pending_assets = assets
+        self.local_page.asset_combo.clear()
+        if not assets:
+            self.local_page.asset_combo.addItem("ไม่พบไฟล์ zip ที่ใช้กับระบบนี้", "")
+            return
+        for entry in assets:
+            size = entry["size"] / (1 << 30)
+            self.local_page.asset_combo.addItem(
+                f"{entry['tag']} · {entry['name']} ({size:.2f} GB)", entry)
+        self.status.setText(f"พบ {len(assets)} รุ่น • เลือกรุ่นที่ตรงกับการ์ดจอของคุณ "
+                            "(cuda = NVIDIA, vulkan = ทั่วไป, cpu = ไม่มีการ์ดจอ)")
+
+    def install_llama_asset(self, asset):
+        if not isinstance(asset, dict) or not asset.get("url"):
+            QMessageBox.warning(self, "ยังไม่ได้เลือกรุ่น", "กด ‘ดึงรายการจาก GitHub’ แล้วเลือกรุ่นก่อน")
+            return
+        if not self._confirm_download([(asset["name"], asset.get("size", 0))],
+                                      "ไฟล์รัน llama-server (zip จาก GitHub ทางการของ llama.cpp)"):
+            return
+        target = self.store.root / "llama" / "downloads" / str(asset["name"])
+        self._start_download("llama-server", asset["url"], target)
+
+    def list_llama_files(self, repo: str):
+        if not repo:
+            QMessageBox.warning(self, "ยังไม่มี repo", "เลือกโมเดลแนะนำหรือพิมพ์ repo ก่อน")
+            return
+        answer = QMessageBox.question(
+            self, "ดูรายการไฟล์บน Hugging Face?",
+            f"จะอ่านรายชื่อไฟล์ของ {repo} ผ่าน huggingface.co\n\n"
+            "เป็นการอ่านข้อมูลสาธารณะ ไม่ได้ส่งข้อมูลหน้าจอหรือโปรไฟล์เกม\nอนุญาตหรือไม่?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            files = hf_model_files(repo)
+        except LlamaError as exc:
+            QMessageBox.warning(self, "อ่านรายการไฟล์ไม่ได้", str(exc))
+            return
+        if not files:
+            QMessageBox.information(self, "ไม่พบไฟล์ GGUF",
+                                    "repo นี้ไม่มีไฟล์ .gguf • ลองชื่อ repo อื่น")
+            return
+        self.pending_llama_files = files
+        self.local_page.repo_edit.setText(repo)
+        self.local_page.show_files(files, repo)
+        self.status.setText(f"พบ {len(files)} ไฟล์ GGUF • เลือกแถวแล้วกดดาวน์โหลด")
+
+    def _confirm_download(self, entries, what: str) -> bool:
+        """One consent dialog per batch, naming every host, size and where the file will land."""
+        from .llama import ALLOWED_HOSTS
+        total = sum(size for _, size in entries) / (1 << 30)
+        names = "\n".join(f"• {name} ({size / (1 << 30):.2f} GB)" if size else f"• {name}"
+                           for name, size in entries[:6])
+        answer = QMessageBox.question(
+            self, "ยืนยันการดาวน์โหลด?",
+            f"{what}\n\n{names}\n\nรวมประมาณ {total:.2f} GB • "
+            f"เก็บไว้ที่ {models_dir(self.store.root).parent}\n"
+            f"อนุญาตให้เชื่อมต่อเฉพาะ: {', '.join(ALLOWED_HOSTS[:2])} …\n"
+            "ไฟล์เป็นข้อมูลจากอินเทอร์เน็ต — ตรวจพื้นที่ว่างและแพ็กเกจอินเทอร์เน็ตของคุณด้วย\n"
+            "เริ่มดาวน์โหลดหรือไม่?")
+        return answer == QMessageBox.StandardButton.Yes
+
+    def download_llama_selection(self, row: int):
+        if row < 0 or row >= len(self.pending_llama_files):
+            QMessageBox.warning(self, "ยังไม่ได้เลือกไฟล์", "เลือกรายการในตารางก่อน")
+            return
+        entry = self.pending_llama_files[row]
+        repo = self.local_page.repo_edit.text().strip()
+        self._download_entries(repo, [entry])
+
+    def download_llama_recommended(self):
+        """Download the suggested quant plus the matching mmproj, using the HF API list."""
+        repo = self.local_page.repo_edit.text().strip() or self.local_page._catalog_field("repo")
+        if not self.pending_llama_files or self.local_page.repo_edit.text().strip() != repo:
+            self.list_llama_files(repo)
+            if not self.pending_llama_files:
+                return
+        quant = self.local_page.quant_combo.currentText()
+        model, projector = pick_quant_files(self.pending_llama_files, quant)
+        entries = [entry for entry in (model, projector) if entry]
+        if not entries:
+            QMessageBox.warning(self, "เลือกไฟล์ไม่ได้", "ไม่พบไฟล์ที่ตรงกับ quant นี้")
+            return
+        self._download_entries(repo, entries)
+
+    def _download_entries(self, repo: str, entries):
+        unknown = [entry for entry in entries if not entry.get("size")]
+        if unknown and not self._confirm_download([(entry["name"], 0) for entry in unknown],
+                                                 "ไฟล์ที่ไม่ทราบขนาดล่วงหน้า"):
+            return
+        if not self._confirm_download([(entry["name"], entry.get("size", 0)) for entry in entries],
+                                      f"โมเดลจาก Hugging Face ({repo})"):
+            return
+        for entry in entries:
+            from .llama import hf_download_url
+            try:
+                url = hf_download_url(repo, entry["name"])
+            except LlamaError as exc:
+                QMessageBox.warning(self, "ลิงก์ไม่ถูกต้อง", str(exc))
+                continue
+            target = models_dir(self.store.root) / entry["name"]
+            self._start_download(entry["name"], url, target)
+
+    def _start_download(self, label: str, url: str, target: Path):
+        if label in self.downloads:
+            self.status.setText(f"กำลังดาวน์โหลด {label} อยู่แล้ว")
+            return
+        self.downloads[label] = {"done": 0, "total": 0, "name": label}
+        self.local_page.cancel_button.setEnabled(True)
+        self.download_requested.emit(label, url, str(target))
+        self.status.setText(f"เริ่มดาวน์โหลด {label} … (เรียนต่อได้ถ้าหยุดกลางคัน)")
+
+    def _download_progress(self, label: str, done: int, total: int):
+        # Only an *active* download is tracked here: a stray progress signal must never make the
+        # next attempt think a transfer is already running (that would block retries).
+        entry = self.downloads.get(label)
+        if entry is not None:
+            entry["done"], entry["total"] = done, total
+        percent = (done / total * 100) if total else 0.0
+        self.local_page.download_note.setText(
+            f"{label}: {done / (1 << 30):.2f}/{total / (1 << 30):.2f} GB ({percent:.0f}%)")
+        self.status.setText(f"ดาวน์โหลด {label} • {percent:.0f}%")
+
+    def _download_done(self, label: str, path: str, error: str):
+        entry = self.downloads.pop(label, None)
+        if not self.downloads:
+            self.local_page.cancel_button.setEnabled(False)
+        name = (entry or {}).get("name", label)
+        self.local_page.mark_file(name, "เสร็จแล้ว" if path else f"ล้มเหลว: {error[:40]}")
+        if error:
+            self.download_failures.append((name, error))
+            self.local_page.download_note.setText(f"{name}: {error}")
+            self.status.setText(f"ดาวน์โหลด {name} ไม่สำเร็จ: {error}")
+            return
+        size_gb = Path(path).stat().st_size / (1 << 30)
+        self.local_page.download_note.setText(f"{name}: เสร็จแล้ว ({size_gb:.2f} GB) → {path}")
+        self.status.setText(f"ดาวน์โหลด {name} เสร็จ • ไปที่ขั้นที่ 3 เพื่อเริ่มใช้งาน")
+        if name.lower().endswith(".zip"):
+            self._install_binary_zip(Path(path))
+            return
+        self.refresh_llama_models()
+
+    def _install_binary_zip(self, zip_path: Path):
+        try:
+            written = extract_binary(zip_path, bin_dir(self.store.root))
+        except (LlamaError, OSError) as exc:
+            QMessageBox.warning(self, "แตกไฟล์ไม่ได้", str(exc))
+            return
+        binary = next((path for path in written
+                       if path.name.lower().startswith("llama-server")), None)
+        if binary is None:
+            QMessageBox.warning(self, "ไม่พบ llama-server", "แตกไฟล์ได้แต่ไม่พบโปรแกรม")
+            return
+        self.local_page.binary_edit.setText(str(binary))
+        self.settings = replace(self.settings, llama_binary=str(binary))
+        try:
+            self.store.save_settings(self.settings)
+        except OSError:
+            pass
+        zip_path.unlink(missing_ok=True)
+        QMessageBox.information(
+            self, "ติดตั้งแล้ว",
+            f"ติดตั้ง llama-server ที่\n{binary}\n\nไฟล์ zip ถูกลบหลังแตกแล้ว • "
+            "ต่อไปเลือกรุ่นโมเดลในขั้นที่ 2 และกด ‘เริ่ม llama-server’")
+
+    def cancel_downloads(self):
+        self.download_worker.cancel()
+        self.status.setText("กำลังยกเลิกการดาวน์โหลด (ไฟล์บางส่วนถูกเก็บไว้ให้เรียนต่อ)")
+        self.local_page.cancel_button.setEnabled(False)
+
+    def refresh_llama_models(self):
+        models = installed_models(self.store.root)
+        self.local_page.show_models(models)
+        count = len(models)
+        self.status.setText(f"พบโมเดลในเครื่อง {count} ไฟล์" if count
+                            else "ยังไม่มีโมเดลในเครื่อง • ดาวน์โหลดในขั้นที่ 2")
+        return models
+
+    def start_llama(self) -> bool:
+        values = self.local_page.values()
+        entry = self.local_page.model_combo.currentData() or {}
+        model = entry.get("path") or self.settings.llama_model
+        binary = values["binary"] or self.settings.llama_binary
+        if not binary:
+            binary = ""
+        if not model:
+            QMessageBox.warning(self, "ยังไม่ได้เลือกโมเดล", "ดาวน์โหลดหรือเลือกไฟล์ .gguf ก่อน")
+            return False
+        guess = settings_guess(installed_models(self.store.root))
+        try:
+            self.llama.binary = find_binary(binary, bin_dir(self.store.root)) or \
+                (Path(binary) if binary else None)
+            url = self.llama.start(Path(model), port=values["port"], ctx=values["ctx"],
+                                   gpu_layers=values["gpu"],
+                                   mmproj=Path(entry["projector"]) if entry.get("projector") else None)
+        except LlamaError as exc:
+            QMessageBox.warning(self, "เริ่มไม่ได้", str(exc))
+            return False
+        self.local_page.status_label.setText(
+            f"กำลังเริ่ม… {Path(model).name} • {guess['note']}")
+        self.settings = replace(self.settings, llama_binary=str(self.llama.binary or binary),
+                                llama_model=str(model), llama_port=values["port"],
+                                llama_ctx=values["ctx"], llama_gpu_layers=values["gpu"])
+        self.local_page.port.setValue(self.settings.llama_port)
+        self.local_page.ctx.setValue(self.settings.llama_ctx)
+        self.local_page.gpu.setValue(self.settings.llama_gpu_layers)
+        self._llama_poll(attempts=0)
+        self._llama_log_tick()
+        self.status.setText(f"กำลังโหลดโมเดลเข้า llama-server ที่ {url} …")
+        return True
+
+    def _llama_poll(self, attempts: int):
+        """Poll /health without blocking the UI; report the real reason when it fails."""
+        if self.llama.state.running:
+            self.local_page.status_label.setText(self.llama.status_text())
+            self.status.setText("llama-server พร้อมใช้งาน • กด ‘ตั้งเป็น AI ของแอป’ เพื่อใช้")
+            models = self.llama.models()
+            if models:
+                self.local_page.status_label.setText(
+                    self.llama.status_text() + f" • โมเดลที่โหลด: {models[0][:60]}")
+            return
+        if attempts > 300:                     # ~150 วินาที จึงยอมสรุปว่าโหลดไม่สำเร็จ
+            self.llama.timed_out()
+            self.local_page.status_label.setText(self.llama.status_text())
+            self.status.setText("llama-server ยังไม่พร้อม • ดู log ในแท็บ Local AI "
+                                "(ลอง quant เล็กลงหรือลด context)")
+            return
+        if attempts % 2 == 0:
+            # Short, non-terminal probe: 503/connection-refused during model load is normal and
+            # must not be reported as a failure (and must not block the UI for long).
+            self.llama.probe(timeout=0.7)
+            if not self.llama.state.running and self.llama.state.starting:
+                self.local_page.status_label.setText(self.llama.status_text())
+        if self.llama.state.error and not self.llama.state.starting:
+            self.local_page.status_label.setText("มีปัญหา: " + self.llama.state.error)
+            self.status.setText("llama-server มีปัญหา • ดู log ในแท็บ Local AI")
+            return
+        QTimer.singleShot(500, lambda: self._llama_poll(attempts + 1))
+
+    def _llama_log_tick(self):
+        log = self.llama.state.log[-40:]
+        if log:
+            text = "\n".join(log)
+            if text != self.local_page.log_view.toPlainText()[-4000:]:
+                self.local_page.log_view.setPlainText(text)
+        if self.llama.state.starting or self.llama.state.running:
+            QTimer.singleShot(1000, self._llama_log_tick)
+
+    def stop_llama(self) -> bool:
+        stopped = self.llama.stop()
+        self.local_page.status_label.setText(self.llama.status_text())
+        self.status.setText("หยุด llama-server แล้ว" if stopped else "หยุดไม่สำเร็จ")
+        return stopped
+
+    def use_llama_endpoint(self) -> bool:
+        """Point the app at the local server without touching anything else."""
+        if not self.llama.state.running:
+            QMessageBox.warning(self, "ยังไม่ทำงาน",
+                                "กด ‘เริ่ม llama-server’ และรอสถานะเป็น ‘ทำงานอยู่’ ก่อน")
+            return False
+        endpoint = self.llama.base_url
+        self.provider.setCurrentIndex(max(0, self.provider.findData("openai")))
+        self.endpoint.setText(endpoint)
+        models = self.llama.models()
+        if models:
+            self.model.setText(models[0])
+        elif not self.model.text().strip():
+            self.model.setText(Path(self.settings.llama_model).name or "local-model")
+        self.settings = replace(self.settings, provider="openai", endpoint=endpoint,
+                                model=self.model.text().strip())
+        try:
+            self.store.save_settings(self.read_settings())
+        except (OSError, ValueError):
+            pass
+        self.status.setText(f"ตั้งเป็น AI ของแอปแล้ว • {endpoint} • "
+                            "โหมดนี้อยู่ในเครื่อง จึงไม่ต้องยืนยันส่งข้อมูลออกนอกเครื่อง")
+        self.local_page.status_label.setText(self.llama.status_text() + " • ใช้เป็น AI ของแอปแล้ว")
+        return True
+
+    def llama_auto_start_allowed(self) -> bool:
+        """Auto-start only when the app already points at the loopback server.
+
+        A remote endpoint or a non-openai provider must never launch a local process behind the
+        user's back; a missing binary/model is likewise a quiet "no".
+        """
+        s = self.settings
+        return bool(s.llama_auto_start and s.llama_binary and s.llama_model
+                    and s.provider == "openai"
+                    and s.endpoint.startswith(("http://127.0.0.1", "http://localhost")))
+
+    def ensure_llama_running(self) -> bool:
+        """Start the local server when it is configured and wanted (never silently downloads)."""
+        if self.llama.state.running:
+            return True
+        if not self.llama_auto_start_allowed():
+            return False
+        return self.start_llama()
 
     # --- self-check ---------------------------------------------------------------------
 
@@ -1022,6 +1373,8 @@ class Window(QMainWindow):
                     "อาจมีข้อมูลส่วนตัวบนจอ และอาจมีค่าบริการต่อคำขอ\nอนุญาตสำหรับการแปลรอบนี้หรือไม่?")
                 if answer != QMessageBox.StandardButton.Yes:
                     return
+            if self.llama_auto_start_allowed() and not self.llama.state.running:
+                self.ensure_llama_running()
             if not self.save_memory():
                 return
             self.store.save_settings(settings)
@@ -1467,19 +1820,25 @@ class Window(QMainWindow):
             self.closing = True
             self.closing_at = time.monotonic()
             self.stop()
+            try:
+                self.llama.stop(grace=4.0)      # never leave a llama-server child behind
+            except Exception:
+                pass
             self.expiry.stop()
             self.hotkeys.close()
             self.tray.hide()
             self.overlay.close()
             self.centralWidget().setEnabled(False)
             self.status.setText("กำลังปิด • รอ OCR / AI / ใบหน้า ที่ส่งไปแล้วจบหรือ timeout")
-            for thread in (self.ocr_thread, self.ai_thread, self.vision_thread, self.research_thread):
+            for thread in (self.ocr_thread, self.ai_thread, self.vision_thread,
+                           self.research_thread, self.download_thread):
                 thread.quit()
             QTimer.singleShot(0, self._shutdown_ready)
 
     def _workers_running(self) -> bool:
         return any(thread.isRunning() for thread in (self.ocr_thread, self.ai_thread,
-                                                     self.vision_thread, self.research_thread))
+                                                     self.vision_thread, self.research_thread,
+                                                     self.download_thread))
 
     def _shutdown_ready(self):
         """Poll until the workers have really stopped, then quit.

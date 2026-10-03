@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .llama import CATALOG, QUANTS, TIP
 from .research import DEFAULT_ENDPOINTS, SEARCH_PROVIDERS
 
 SEARCH_LABELS = [("ปิด · ไม่ค้นเว็บ", "off"), ("SearXNG (ของตัวเอง/ในเครื่อง)", "searxng"),
@@ -473,6 +474,223 @@ class CharactersPage(QWidget):
         return self.bind_name.currentText().strip()
 
 
+class LocalAIPage(QWidget):
+    """Install llama.cpp, download GGUF models and run them — all without leaving the app."""
+
+    def __init__(self, session):
+        super().__init__()
+        self.session = session
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        title = QLabel("Local AI ในเครื่อง · llama.cpp (ดาวน์โหลด/รันได้จากที่นี่ ไม่ต้องติดตั้ง Ollama)")
+        title.setObjectName("muted")
+        root.addWidget(title)
+
+        # --- step 1: the server binary
+        binary_box = QGroupBox("ขั้นที่ 1 · ตัวรัน llama-server")
+        binary_layout = QFormLayout(binary_box)
+        row = QHBoxLayout()
+        self.binary_edit = QLineEdit()
+        self.binary_edit.setPlaceholderText("ยังไม่มีไฟล์ — กด ‘เลือกไฟล์’ หรือ ‘ดึงรายการจาก GitHub’")
+        browse = QPushButton("เลือกไฟล์…")
+        browse.clicked.connect(lambda: self.session.pick_llama_binary())
+        row.addWidget(self.binary_edit, 1)
+        row.addWidget(browse)
+        binary_layout.addRow("ไฟล์ llama-server", row)
+        fetch_row = QHBoxLayout()
+        self.asset_combo = QComboBox()
+        self.asset_combo.setMinimumWidth(320)
+        self.asset_combo.addItem("— กดปุ่มขวาเพื่อดึงรายการจาก GitHub releases —", "")
+        self.fetch_assets = QPushButton("ดึงรายการจาก GitHub")
+        self.fetch_assets.clicked.connect(lambda: self.session.fetch_llama_assets())
+        self.install_binary = QPushButton("ดาวน์โหลด + ติดตั้งที่เลือก")
+        self.install_binary.clicked.connect(lambda: self.session.install_llama_asset(
+            self.asset_combo.currentData()))
+        fetch_row.addWidget(self.asset_combo, 1)
+        fetch_row.addWidget(self.fetch_assets)
+        fetch_row.addWidget(self.install_binary)
+        binary_layout.addRow("รุ่นที่พบ", fetch_row)
+        root.addWidget(binary_box)
+
+        # --- step 2: the model
+        model_box = QGroupBox("ขั้นที่ 2 · โมเดล GGUF (จาก Hugging Face)")
+        model_layout = QVBoxLayout(model_box)
+        model_layout.addWidget(QLabel(TIP))
+        pick = QHBoxLayout()
+        self.catalog_combo = QComboBox()
+        for entry in CATALOG:
+            self.catalog_combo.addItem(entry["label"], entry["id"])
+        self.catalog_combo.currentIndexChanged.connect(self._catalog_changed)
+        self.quant_combo = QComboBox()
+        self.quant_combo.addItems(QUANTS)
+        self.repo_edit = QLineEdit()
+        self.repo_edit.setPlaceholderText("หรือพิมพ์ repo เอง เช่น bartowski/Qwen2.5-7B-Instruct-GGUF")
+        self.list_button = QPushButton("ดูไฟล์ใน repo")
+        self.list_button.clicked.connect(lambda: self.session.list_llama_files(
+            self.repo_edit.text().strip() or self._catalog_field("repo")))
+        pick.addWidget(QLabel("โมเดลแนะนำ"))
+        pick.addWidget(self.catalog_combo, 2)
+        pick.addWidget(QLabel("quant"))
+        pick.addWidget(self.quant_combo, 1)
+        model_layout.addLayout(pick)
+        repo_row = QHBoxLayout()
+        repo_row.addWidget(self.repo_edit, 1)
+        repo_row.addWidget(self.list_button)
+        model_layout.addLayout(repo_row)
+        self.file_table = QTableWidget(0, 4)
+        self.file_table.setHorizontalHeaderLabels(["ไฟล์", "ขนาด (GB)", "ชนิด", "สถานะ"])
+        self.file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.file_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.file_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.file_table.setMinimumHeight(150)
+        model_layout.addWidget(self.file_table)
+        download_row = QHBoxLayout()
+        self.download_button = QPushButton("ดาวน์โหลดไฟล์ที่เลือก")
+        self.download_button.clicked.connect(lambda: self.session.download_llama_selection(
+            self.file_table.currentRow()))
+        self.download_recommended = QPushButton("ดาวน์โหลดชุดที่แนะนำ (โมเดล + mmproj)")
+        self.download_recommended.clicked.connect(lambda: self.session.download_llama_recommended())
+        self.cancel_button = QPushButton("ยกเลิกการดาวน์โหลด")
+        self.cancel_button.clicked.connect(lambda: self.session.cancel_downloads())
+        self.cancel_button.setEnabled(False)
+        download_row.addWidget(self.download_button, 1)
+        download_row.addWidget(self.download_recommended, 2)
+        download_row.addWidget(self.cancel_button, 1)
+        model_layout.addLayout(download_row)
+        self.download_note = QLabel("ยังไม่เริ่มดาวน์โหลด • ทุกอย่างเป็น HTTPS และหยุด/เรียนต่อได้")
+        self.download_note.setObjectName("muted")
+        self.download_note.setWordWrap(True)
+        model_layout.addWidget(self.download_note)
+        root.addWidget(model_box)
+
+        # --- step 3: run it
+        run_box = QGroupBox("ขั้นที่ 3 · เปิดใช้เป็น AI ของแอป")
+        run_layout = QVBoxLayout(run_box)
+        model_row = QHBoxLayout()
+        self.model_combo = QComboBox()
+        self.model_combo.currentIndexChanged.connect(self._model_changed)
+        reload_models = QPushButton("สแกนไฟล์ในเครื่อง")
+        reload_models.clicked.connect(lambda: self.session.refresh_llama_models())
+        model_row.addWidget(QLabel("โมเดลในเครื่อง"))
+        model_row.addWidget(self.model_combo, 1)
+        model_row.addWidget(reload_models)
+        run_layout.addLayout(model_row)
+        settings_row = QHBoxLayout()
+        self.port = QSpinBox()
+        self.port.setRange(1024, 65535)
+        self.ctx = QSpinBox()
+        self.ctx.setRange(2048, 131072)
+        self.ctx.setSingleStep(2048)
+        self.gpu = QSpinBox()
+        self.gpu.setRange(0, 999)
+        self.gpu.setToolTip("0 = ใช้ CPU ล้วน • เพิ่มตาม VRAM ที่เหลือ")
+        for label, widget in (("พอร์ต", self.port), ("ctx", self.ctx), ("n-gpu-layers", self.gpu)):
+            settings_row.addWidget(QLabel(label))
+            settings_row.addWidget(widget)
+        run_layout.addLayout(settings_row)
+        control_row = QHBoxLayout()
+        self.start_button = QPushButton("เริ่ม llama-server")
+        self.start_button.setObjectName("primary")
+        self.start_button.clicked.connect(lambda: self.session.start_llama())
+        self.stop_button = QPushButton("หยุด")
+        self.stop_button.clicked.connect(lambda: self.session.stop_llama())
+        self.use_button = QPushButton("ตั้งเป็น AI ของแอป (OpenAI-compatible)")
+        self.use_button.clicked.connect(lambda: self.session.use_llama_endpoint())
+        control_row.addWidget(self.start_button, 2)
+        control_row.addWidget(self.stop_button, 1)
+        control_row.addWidget(self.use_button, 2)
+        run_layout.addLayout(control_row)
+        self.status_label = QLabel("ยังไม่ทำงาน")
+        self.status_label.setObjectName("status")
+        self.status_label.setWordWrap(True)
+        run_layout.addWidget(self.status_label)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumHeight(140)
+        self.log_view.setPlaceholderText("log ของ llama-server จะแสดงที่นี่")
+        run_layout.addWidget(self.log_view)
+        note = QLabel("เซิร์ฟเวอร์ผูกกับ 127.0.0.1 เท่านั้น (ไม่เปิดสู่วงนอก) และปิดเองเมื่อปิดแอป • "
+                      "โมเดลที่โหลดแล้วเป็นไฟล์ในเครื่องคุณ ใช้ซ้ำได้ไม่ต้องโหลดใหม่ • "
+                      "ถ้าไม่กด ‘ตั้งเป็น AI ของแอป’ การตั้งค่าเดิม (Ollama/ภายนอก) จะไม่เปลี่ยน")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        run_layout.addWidget(note)
+        root.addWidget(run_box)
+        root.addStretch()
+
+    # --- helpers -----------------------------------------------------------------------
+    def _catalog_field(self, field: str):
+        for entry in CATALOG:
+            if entry["id"] == self.catalog_combo.currentData():
+                return entry.get(field, "")
+        return ""
+
+    def _catalog_changed(self):
+        entry = next((item for item in CATALOG if item["id"] == self.catalog_combo.currentData()), {})
+        if entry.get("quant"):
+            self.quant_combo.setCurrentText(entry["quant"])
+        self.repo_edit.setText(entry.get("repo", ""))
+
+    def _model_changed(self):
+        entry = self.model_combo.currentData() or {}
+        if not entry:
+            return
+        rmem = entry.get("ram_gb")
+        if rmem:
+            self.session.llama_note(f"โมเดลนี้เหมาะกับ RAM ประมาณ {rmem} GB ขึ้นไป")
+
+    def load(self, settings):
+        self.binary_edit.setText(settings.llama_binary)
+        self.port.setValue(settings.llama_port)
+        self.ctx.setValue(settings.llama_ctx)
+        self.gpu.setValue(settings.llama_gpu_layers)
+
+    def values(self) -> dict:
+        return {"binary": self.binary_edit.text().strip()[:400], "port": self.port.value(),
+                "ctx": self.ctx.value(), "gpu": self.gpu.value()}
+
+    def show_files(self, files, repo: str):
+        self.file_table.setRowCount(0)
+        for entry in files:
+            row = self.file_table.rowCount()
+            self.file_table.insertRow(row)
+            size = entry["size"] / (1 << 30)
+            cells = (entry["name"], f"{size:.2f}" if entry["size"] else "?",
+                     "vision projector" if entry["mmproj"] else "โมเดล", "ยังไม่มี")
+            for column, text in enumerate(cells):
+                self.file_table.setItem(row, column, QTableWidgetItem(text))
+        self.download_note.setText(f"พบ {len(files)} ไฟล์ใน {repo} • เลือกแถวแล้วกดดาวน์โหลด "
+                                   "(หรือใช้ชุดที่แนะนำ)")
+
+    def mark_file(self, name: str, status: str):
+        for row in range(self.file_table.rowCount()):
+            item = self.file_table.item(row, 0)
+            cell = self.file_table.item(row, 3)
+            if item is not None and cell is not None and item.text() == name:
+                cell.setText(status)
+
+    def ready_file_names(self) -> list[str]:
+        return [self.file_table.item(row, 0).text() for row in range(self.file_table.rowCount())
+                if self.file_table.item(row, 3) and
+                self.file_table.item(row, 3).text().startswith("เสร็จ")]
+
+    def show_models(self, models):
+        current = self.model_combo.currentData()
+        self.model_combo.clear()
+        if not models:
+            self.model_combo.addItem("— ยังไม่มีโมเดลในเครื่อง กดดาวน์โหลดด้านบน —", {})
+            return
+        for entry in models:
+            label = f"{entry['name']} ({entry['size'] / (1 << 30):.1f} GB)" + \
+                (" · มี mmproj" if entry.get("projector") else "")
+            self.model_combo.addItem(label, entry)
+        if current:
+            for index in range(self.model_combo.count()):
+                if self.model_combo.itemData(index).get("path") == current.get("path"):
+                    self.model_combo.setCurrentIndex(index)
+                    break
+
+
 def ask_name(parent, title: str, label: str, default: str = "") -> str:
     from PySide6.QtWidgets import QInputDialog
     text, ok = QInputDialog.getText(parent, title, label, text=default)
@@ -487,5 +705,5 @@ def information(parent, title: str, message: str):
     QMessageBox.information(parent, title, message)
 
 
-__all__ = ["ResearchPage", "CharactersPage", "render_brief", "pil_to_pixmap", "ask_name",
+__all__ = ["ResearchPage", "CharactersPage", "LocalAIPage", "render_brief", "pil_to_pixmap", "ask_name",
            "warning", "information", "SEARCH_PROVIDERS"]

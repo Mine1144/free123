@@ -35,6 +35,13 @@ powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 
 ## ตั้งค่า AI
 
+### Local AI ในแอป (ไม่ต้องติดตั้งอะไรเพิ่ม)
+
+แท็บ **Local AI (llama.cpp)** ทำให้ครบในโปรแกรมเดียว: ดาวน์โหลดไฟล์ `llama-server` → ดาวน์โหลดโมเดล `.gguf`
+จาก Hugging Face (มีแคตตาล็อก + ช่องพิมพ์ repo เอง) → กดเริ่มและกด *ตั้งเป็น AI ของแอป*
+เซิร์ฟเวอร์ผูกกับ `127.0.0.1` เท่านั้นและปิด web UI ทุกครั้งที่มีการเชื่อมต่อออกอินเทอร์เน็ตจะมีกล่องยินยอมบอกปลายทางและขนาดก่อน
+รายละเอียดทั้งหมด (พาธจัดเก็บ ตั้งค่า quant/mmproj การโหลดต่อ การแก้ปัญหา ลิขสิทธิ์โมเดล): [docs/LOCAL-AI.md](docs/LOCAL-AI.md)
+
 ### Local AI ด้วย Ollama
 
 1. ติดตั้ง [Ollama สำหรับ Windows](https://ollama.com/download/windows) และเปิดบริการ
@@ -73,6 +80,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 
 - **Overlay บนเดสก์ท็อปจริง**: always-on-top, click-through, ข้อความไทยตัดบรรทัดด้วย Qt ปรับขนาดอักษรและความทึบแผ่นพื้นหลังได้
 - **เลือกจอ/พื้นที่**: เลือกหนึ่งจอต่อรอบ รองรับการคำนวณพิกัดจอด้านซ้ายที่เป็นค่าลบและ DPI scaling; เมื่อการจัดจอเปลี่ยนจะหยุดเพื่อป้องกันจับผิดจอ
+- **Local AI แบบ llama.cpp ในตัวแอป**: แท็บ *Local AI (llama.cpp)* ดาวน์โหลด `llama-server` จาก GitHub releases และโมเดล `.gguf` จาก Hugging Face ให้เอง (แสดงขนาด/ความคืบหน้า, โหลดต่อจากไฟล์ `.part` ได้, ยกเลิกได้, ตรวจ SHA-256 เมื่อมีให้ตรวจ) แล้วรันเซิร์ฟเวอร์ OpenAI-compatible บน **127.0.0.1 เท่านั้น** พร้อมปุ่ม *ตั้งเป็น AI ของแอป* — ไม่ต้องติดตั้ง Ollama หรือเครื่องมือภายนอก ([คู่มือ](docs/LOCAL-AI.md))
 - **AI เลือกข้อความ**: ทั้งข้อความที่อ่านได้, เฉพาะบทสนทนา/ซับ, หรือข้อความสำคัญตามบริบท
 - **AI ดูภาพ**: ส่ง sampled still พร้อม OCR boxes เพื่ออ่านฉาก ไม่ส่งวิดีโอ 60 FPS; ภาพส่ง AI ลดขนาดด้านยาวไม่เกิน 1280px ส่วน OCR อ่านภาพแยกในเครื่อง
 - **บริบทแยกเกม**: notes ที่ยืนยันเอง, glossary, สรุปเรื่องต่อเนื่อง และความสัมพันธ์ที่มีหลักฐานข้อความ เก็บต่อหลังปิดโปรแกรมได้
@@ -108,7 +116,8 @@ powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 
 - OCR และการวาด overlay ทำในเครื่องเสมอ ภาพอยู่ใน RAM ไม่บันทึก screenshot ลงดิสก์
 - โหมดดูภาพส่งภาพของ **พื้นที่ที่เลือก** พร้อม OCR และบริบทให้บริการที่ตั้งไว้; text-only ยังส่งข้อความ OCR และบริบท
-- Local Ollama ที่ `localhost` ไม่ส่งคำขอ inference ไปภายนอกผ่านแอปนี้ (การดาวน์โหลดโมเดลครั้งแรกยังใช้อินเทอร์เน็ต)
+- Local Ollama และ llama.cpp ที่ `localhost`/`127.0.0.1` ไม่ส่งคำขอ inference ไปภายนอกผ่านแอปนี้ (การดาวน์โหลดโมเดล/ไฟล์เซิร์ฟเวอร์ครั้งแรกยังใช้อินเทอร์เน็ต)
+- การดาวน์โหลดของ llama.cpp เชื่อมต่อเฉพาะโฮสต์ในรายการที่กำหนด (huggingface.co, cdn-lfs*.huggingface.co, hf.co, github.com, objects.githubusercontent.com, release-assets.githubusercontent.com) ผ่าน HTTPS และขอยินยอมก่อนทุกครั้ง ที่อ่านรายชื่อหรือดาวน์โหลด; เซิร์ฟเวอร์ในเครื่องเปิด web UI ปิด (`--no-webui`) และไม่ผูกกับที่อยู่ภายนอกเครื่อง
 - สรุปเรื่อง/ความสัมพันธ์/notes/glossary เก็บเป็น JSON แบบอ่านได้ใน `%LOCALAPPDATA%\ScreenThai` **ไม่เข้ารหัส** อาจมีเนื้อหาบนหน้าจอที่ AI สรุปไว้
 - ประวัติไม่บันทึกอัตโนมัติ แต่ไฟล์ที่ส่งออกอาจมีข้อมูลส่วนตัว
 - แท็บบริบทมีปุ่มล้างสิ่งที่ AI เรียนรู้ ลบข้อมูลทั้งหมดได้โดยปิดแอปแล้วลบโฟลเดอร์ข้างต้น; key ที่จำไว้ลบแยกใน Windows Credential Manager หรือเอาเครื่องหมายจำ key ออกแล้วเริ่มรอบใหม่
@@ -130,9 +139,10 @@ powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 12. ข้อมูลจาก "วิจัยเกม" มาจากลิงก์ ผลการค้น และการสรุปของโมเดล อาจสับสนเกมชื่อคล้ายกันหรืออ้างข้อมูลแฟนคลับที่คลาดเคลื่อน จึงติดป้าย "ยังไม่ยืนยัน" จนกว่าคุณจะแก้ และไม่ใช้แทน glossary/notes ที่คุณยืนยันเอง
 12.1 หน่วยความจำคำแปลใช้ข้อความต้นฉบับเป็นกุญแจ: ถ้าเกมเขียนต่างแม้แต่อักขระเดียวจะถือเป็นบรรทัดใหม่ และบรรทัดที่ซ้ำในบริบทต่างกัน (เช่น "ใช่" ในคำถามที่ต่างกัน) อาจถูกนำมาใช้ซ้ำตามตัวอักษร — ตั้ง `translation_memory` เป็น false ได้ในแท็บตั้งค่า
 12.2 รอบตรวจความสม่ำเสมอเป็น *อีกหนึ่งคำขอ* ที่อาจมีค่าใช้จ่าย จึงปิดไว้เป็นค่าเริ่มต้นและจำกัดจำนวนบรรทัดต่อรอบ; การผสานบรรทัดอาจรวมสองประโยคเข้าด้วยกันผิดถ้าเกมไม่มีเครื่องหมายจบประโยค (ปิด `merge_lines` ได้)
+12.3 การดาวน์โหลด llama.cpp/GGUF ในแอปเป็น *ตัวช่วยดาวน์โหลดและรัน* ไม่ใช่การรับรองโมเดล: ไฟล์โมเดลมีขนาดหลาย GB, **ไม่ได้ทดสอบดาวน์โหลด/รันจริงบน Windows ในรีโปนี้**, ไม่มีการอัปเดตอัตโนมัติ, ไม่มี UI ลบโมเดล (ลบไฟล์ในโฟลเดอร์ข้อมูลเอง), ไม่รับประกัน GPU/ความเร็วต่อการ์ดรุ่นใด, และน้ำหนักโมเดลมีใบอนุญาตต่างจากตัว llama.cpp (MIT) — ตรวจใบอนุญาตของ repo ที่เลือกเอง
 13. Windows 10/11 **x64** เป็นเป้าหมาย Windows ARM/32-bit ไม่อยู่ในขอบเขตการทดสอบ
 
-รายละเอียดสี่ฟีเจอร์ใหม่ (ใบหน้า สีหน้า วิธีพูด วิจัยเกม): [docs/CHARACTER-AI.md](docs/CHARACTER-AI.md) · เทียบคลิป: [docs/REFERENCE.md](docs/REFERENCE.md) · แผนทดสอบ: [docs/TESTING.md](docs/TESTING.md)
+รายละเอียด Local AI ในแอป: [docs/LOCAL-AI.md](docs/LOCAL-AI.md) · สี่ฟีเจอร์ใหม่ (ใบหน้า สีหน้า วิธีพูด วิจัยเกม): [docs/CHARACTER-AI.md](docs/CHARACTER-AI.md) · เทียบคลิป: [docs/REFERENCE.md](docs/REFERENCE.md) · แผนทดสอบ: [docs/TESTING.md](docs/TESTING.md)
 
 ## สำหรับพัฒนา
 
@@ -142,7 +152,8 @@ py -3.11 -m venv .venv
 .venv\Scripts\python -m pytest -q
 .venv\Scripts\python -m ruff check .
 .venv\Scripts\python scripts/smoke-ocr.py
+.venv\Scripts\python scripts/smoke-llama.py   # เดินครบเส้นทาง Local AI โดยไม่ต้องมีเน็ต/เซิร์ฟเวอร์จริง
 .venv\Scripts\python -m screen_thai.app
 ```
 
-โครงสร้าง: `app.py` ควบคุม UI/session, `capture.py` พิกัดจอ, `pipeline.py` workers, `providers.py` AI transport/prompt, `state.py` anti-stale, `overlay.py` วาดคำแปล/เลือกพื้นที่, `storage.py` โปรไฟล์/key, `graph.py` กราฟความสัมพันธ์
+โครงสร้าง: `app.py` ควบคุม UI/session, `capture.py` พิกัดจอ, `pipeline.py` workers, `providers.py` AI transport/prompt, `state.py` anti-stale, `overlay.py` วาดคำแปล/เลือกพื้นที่, `storage.py` โปรไฟล์/key, `graph.py` กราฟความสัมพันธ์, `llama.py` ดาวน์โหลด/รัน llama.cpp ในเครื่อง

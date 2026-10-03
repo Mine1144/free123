@@ -22,6 +22,10 @@ EP2 เพิ่มสรุปสิ่งที่ AI เห็น (People / P
 | Overlay สำหรับผู้เล่น ไม่ใช่ OBS | มี | Qt transparent topmost window, click-through |
 | ทั้งจอหรือเลือกพื้นที่ | มี | จอเดียวต่อรอบ ไม่ใช่ทุกจอพร้อมกัน |
 | Local AI | มี | Ollama native `/api/chat`; ดาวน์โหลดโมเดลเอง |
+| ดาวน์โหลด/จัดการ llama.cpp ในแอป | มี | `llama-server` จาก GitHub releases (แตก zip แบบปฏิเสธ `..`/path สัมบูรณ์) และ GGUF จาก Hugging Face; โหลดต่อจาก `.part`, ยกเลิกได้, ตรวจขนาด/SHA-256; เก็บในโฟลเดอร์ข้อมูลผู้ใช้ [คู่มือ](LOCAL-AI.md) |
+| รันเซิร์ฟเวอร์ในเครื่อง (OpenAI-compatible) | มี | `llama-server` ผูก `127.0.0.1` + `--no-webui`, poll `/health`, log ท้ายจอ, ปุ่มตั้งเป็น AI ของแอป; ปิดแอปแล้วสั่งหยุดให้ |
+| อัปเดต/ดาวน์โหลดอัตโนมัติ เบื้องหลัง | **ไม่มี** | ทุกอย่างเริ่มจากปุ่มผู้ใช้และกล่องยินยอม; ไม่มี auto-update |
+| รับประกัน GPU offload / ความเร็วต่อการ์ด | **ไม่มี** | ตั้ง `n-gpu-layers` เอง; ค่าเริ่มต้น CPU ล้วน |
 | API key ภายนอก | มี | OpenAI-compatible `/chat/completions` |
 | People / Place / Action | มี | ข้อสังเกตจาก AI ไม่ถือเป็นการระบุตัวตนที่ยืนยัน |
 | จำบริบทข้ามการเปิดแอป | มี | JSON profiles แยกเกม |

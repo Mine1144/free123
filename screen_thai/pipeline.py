@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+from pathlib import Path
+
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import QObject, Signal, Slot
@@ -112,6 +115,45 @@ class AIWorker(QObject):
             message = str(exc) if isinstance(exc, (ProviderError, ValueError)) \
                 else "เกิดข้อผิดพลาดภายใน AI client"
             self.done.emit(epoch, revision, None, message, None)
+
+
+class DownloadWorker(QObject):
+    """Download one URL into one file. Runs in its own thread so the UI stays responsive.
+
+    Progress is throttled to ~4 updates/second (a 6 GB file would otherwise flood the event
+    queue), cancellation is cooperative, and a partial file is kept so the next attempt resumes.
+    """
+
+    progress = Signal(str, int, int)      # label, bytes done, bytes total
+    done = Signal(str, str, str)          # label, path ("" on failure), error
+
+    def __init__(self):
+        super().__init__()
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    @Slot(str, str, str)
+    def process(self, label: str, url: str, target: str):
+        from .llama import Downloader, LlamaError
+        self._cancel = False
+        last = [0.0]
+
+        def report(written: int, total: int):
+            now = time.monotonic()
+            if now - last[0] >= 0.25 or written == total:
+                last[0] = now
+                self.progress.emit(label, written, total)
+
+        try:
+            result = Downloader().fetch(url, Path(target), progress=report,
+                                        cancel=lambda: self._cancel)
+            self.done.emit(label, str(result.path), "")
+        except LlamaError as exc:
+            self.done.emit(label, "", str(exc))
+        except Exception as exc:                      # pragma: no cover - defensive
+            self.done.emit(label, "", f"ดาวน์โหลดล้มเหลว: {exc.__class__.__name__}")
 
 
 class ResearchWorker(QObject):

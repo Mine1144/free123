@@ -91,6 +91,17 @@ class Settings:
     review_consistency: bool = False     # one extra AI pass over flagged lines only
     review_max_lines: int = 12
 
+    # Local AI through llama.cpp, installed and downloaded from inside the app.
+    llama_binary: str = ""             # path to llama-server(.exe); empty = look in the app folder
+    llama_model: str = ""              # path to the .gguf to load
+    llama_mmproj: str = ""             # optional vision projector
+    llama_port: int = 8081
+    llama_ctx: int = 8192
+    llama_gpu_layers: int = 0
+    llama_threads: int = 0
+    llama_auto_start: bool = True      # start the server when translation begins
+    llama_extra_args: str = ""
+
     research_search: str = "off"       # off | searxng | brave | serper | tavily | custom
     research_endpoint: str = ""
     research_max_sources: int = 6
@@ -127,6 +138,14 @@ class Settings:
         default.max_faces = max(1, min(8, default.max_faces))
         default.research_max_sources = max(1, min(12, default.research_max_sources))
         default.review_max_lines = max(1, min(40, default.review_max_lines))
+        default.llama_port = max(1024, min(65535, default.llama_port))
+        default.llama_ctx = max(2048, min(131072, default.llama_ctx))
+        default.llama_gpu_layers = max(0, min(999, default.llama_gpu_layers))
+        default.llama_threads = max(0, min(64, default.llama_threads))
+        default.llama_binary = default.llama_binary[:400]
+        default.llama_model = default.llama_model[:400]
+        default.llama_mmproj = default.llama_mmproj[:400]
+        default.llama_extra_args = default.llama_extra_args[:200]
         default.research_title = default.research_title[:120]
         default.research_aliases = default.research_aliases[:200]
         return default
